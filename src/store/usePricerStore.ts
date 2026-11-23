@@ -1,0 +1,724 @@
+import { create } from 'zustand';
+import type {
+  AppSettings,
+  CostConfig,
+  ExportConfig,
+  GachaProject,
+  GoodItem,
+  MerchCategory,
+  PinTag,
+  ProjectSummary,
+  QuotaInfo,
+  RebalanceResult,
+} from '../types/pricing';
+import { calcEffectiveAvgPrice, calcTargetTotal, rebalanceItems } from '../core/rebalancer';
+import {
+  deleteProjectFromStorage,
+  listProjectSummaries,
+  loadProjectFromStorage,
+  saveProjectToStorage,
+} from '../core/projectStorage';
+import { createSeedDemoProjects } from '../core/demoProjects';
+import { createThumbnailDataUrl, loadImageElement, prepareImageBlobForDetect } from '../core/canvasExport';
+import { contributeMarketApi, detectGoodsApi } from '../api/client';
+
+const SETTINGS_STORAGE_KEY = 'gacha_pricer_settings_v1';
+const MAX_HISTORY = 50;
+
+interface HistorySnapshot {
+  cost: CostConfig;
+  items: GoodItem[];
+  name: string;
+  ipName: string;
+  category: MerchCategory;
+}
+
+export interface ToastNotice {
+  id: number;
+  tone: 'info' | 'success' | 'warning' | 'error';
+  message: string;
+}
+
+function loadPersistedSettings(): AppSettings {
+  const defaults: AppSettings = {
+    inviteCode: 'dev-local-001',
+    contributeMarket: true,
+    exportConfig: {
+      displayMode: 'label_and_price',
+      scale: 1.0,
+      showTag: true,
+    },
+  };
+  if (typeof window === 'undefined') return defaults;
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      inviteCode: typeof parsed.inviteCode === 'string' && parsed.inviteCode.trim() ? parsed.inviteCode : defaults.inviteCode,
+      contributeMarket: typeof parsed.contributeMarket === 'boolean' ? parsed.contributeMarket : defaults.contributeMarket,
+      exportConfig: {
+        displayMode: parsed.exportConfig?.displayMode === 'price_only' ? 'price_only' : 'label_and_price',
+        scale:
+          typeof parsed.exportConfig?.scale === 'number'
+            ? Math.min(1.4, Math.max(0.8, parsed.exportConfig.scale))
+            : 1.0,
+        showTag: typeof parsed.exportConfig?.showTag === 'boolean' ? parsed.exportConfig.showTag : true,
+      },
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+function savePersistedSettings(settings: AppSettings): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function createUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `gp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function snapshotOf(project: GachaProject): HistorySnapshot {
+  return {
+    cost: { ...project.cost },
+    items: project.items.map((it) => ({ ...it })),
+    name: project.name,
+    ipName: project.ipName,
+    category: project.category,
+  };
+}
+
+function computeRebalance(project: GachaProject | null): RebalanceResult {
+  if (!project) {
+    return {
+      items: [],
+      targetTotal: 0,
+      actualTotal: 0,
+      residual: 0,
+      status: 'OK',
+      exceedAmount: 0,
+    };
+  }
+  const target = calcTargetTotal(project.cost);
+  return rebalanceItems(project.items, target, project.cost.step);
+}
+
+interface PricerState {
+  initialized: boolean;
+  projects: ProjectSummary[];
+  activeProject: GachaProject | null;
+  rebalance: RebalanceResult;
+  selectedItemId: string | null;
+  canvasMode: 'select' | 'add_pin';
+  isDetecting: boolean;
+  quota: QuotaInfo | null;
+  settings: AppSettings;
+  past: HistorySnapshot[];
+  future: HistorySnapshot[];
+  toast: ToastNotice | null;
+
+  // Actions
+  initWorkspace: () => Promise<void>;
+  notify: (message: string, tone?: ToastNotice['tone']) => void;
+  clearToast: () => void;
+
+  selectProject: (projectId: string) => Promise<void>;
+  createBlankProject: () => Promise<void>;
+  deleteProject: (projectId: string) => Promise<void>;
+  loadImageIntoActiveProject: (imageDataUrl: string, suggestedName?: string) => Promise<void>;
+
+  updateProjectMeta: (patch: { name?: string; ipName?: string; category?: MerchCategory }) => void;
+  updateCostConfig: (patch: Partial<CostConfig>) => void;
+
+  setSelectedItemId: (id: string | null) => void;
+  setCanvasMode: (mode: 'select' | 'add_pin') => void;
+
+  addPinAt: (x: number, y: number) => void;
+  generateGridPins: (rows: number, cols: number, replaceExisting: boolean) => void;
+  movePinPosition: (id: string, x: number, y: number, commitHistory?: boolean) => void;
+  updateItemPriceAndLock: (id: string, price: number) => void;
+  adjustItemPriceStep: (id: string, delta: number) => void;
+  toggleItemLock: (id: string) => void;
+  updateItemField: (
+    id: string,
+    patch: Partial<Pick<GoodItem, 'label' | 'weight' | 'quantity' | 'tag' | 'minPrice' | 'maxPrice' | 'prepaidPrice' | 'locked'>>
+  ) => void;
+  deleteItem: (id: string) => void;
+  unlockAllItems: () => void;
+  resetEqualWeights: () => void;
+
+  runAiDetect: () => Promise<void>;
+  contributeCurrentProjectQuietly: () => Promise<void>;
+
+  undo: () => void;
+  redo: () => void;
+
+  updateSettings: (patch: Partial<AppSettings>) => void;
+  updateExportConfig: (patch: Partial<ExportConfig>) => void;
+  setQuota: (quota: QuotaInfo | null) => void;
+}
+
+let persistTimer: number | null = null;
+let toastCounter = 1;
+
+function scheduleProjectSave(project: GachaProject, onSaved: (summary: ProjectSummary) => void) {
+  if (typeof window === 'undefined') return;
+  if (persistTimer !== null) {
+    window.clearTimeout(persistTimer);
+  }
+  persistTimer = window.setTimeout(() => {
+    persistTimer = null;
+    void saveProjectToStorage(project).then(onSaved);
+  }, 180);
+}
+
+export const usePricerStore = create<PricerState>((set, get) => {
+  const applyMutation = (
+    updater: (project: GachaProject) => GachaProject,
+    options?: { pushHistory?: boolean; rebalanceNow?: boolean }
+  ) => {
+    const state = get();
+    const current = state.activeProject;
+    if (!current) return;
+
+    const pushHistory = options?.pushHistory !== false;
+    const rebalanceNow = options?.rebalanceNow !== false;
+
+    const prevSnap = pushHistory ? snapshotOf(current) : null;
+    const updatedRaw = updater(current);
+    const updatedWithTime: GachaProject = {
+      ...updatedRaw,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const rebalanced = rebalanceNow
+      ? computeRebalance(updatedWithTime)
+      : {
+          ...state.rebalance,
+          items: updatedWithTime.items,
+        };
+
+    const finalProject: GachaProject = {
+      ...updatedWithTime,
+      items: rebalanced.items,
+    };
+
+    const nextPast = prevSnap
+      ? [...state.past.slice(-(MAX_HISTORY - 1)), prevSnap]
+      : state.past;
+
+    set({
+      activeProject: finalProject,
+      rebalance: rebalanced,
+      past: nextPast,
+      future: prevSnap ? [] : state.future,
+    });
+
+    scheduleProjectSave(finalProject, (summary) => {
+      set((s) => ({
+        projects: [summary, ...s.projects.filter((p) => p.id !== summary.id)],
+      }));
+    });
+  };
+
+  return {
+    initialized: false,
+    projects: [],
+    activeProject: null,
+    rebalance: {
+      items: [],
+      targetTotal: 0,
+      actualTotal: 0,
+      residual: 0,
+      status: 'OK',
+      exceedAmount: 0,
+    },
+    selectedItemId: null,
+    canvasMode: 'select',
+    isDetecting: false,
+    quota: null,
+    settings: loadPersistedSettings(),
+    past: [],
+    future: [],
+    toast: null,
+
+    notify: (message, tone = 'info') => {
+      const id = ++toastCounter;
+      set({ toast: { id, tone, message } });
+      if (typeof window !== 'undefined') {
+        window.setTimeout(() => {
+          set((s) => (s.toast?.id === id ? { toast: null } : s));
+        }, 4200);
+      }
+    },
+
+    clearToast: () => set({ toast: null }),
+
+    initWorkspace: async () => {
+      if (get().initialized) return;
+      let summaries = await listProjectSummaries();
+
+      if (summaries.length === 0) {
+        const demos = createSeedDemoProjects();
+        const savedSummaries: ProjectSummary[] = [];
+        for (const demo of demos) {
+          savedSummaries.push(await saveProjectToStorage(demo));
+        }
+        summaries = savedSummaries.sort(
+          (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+        );
+      }
+
+      const firstId = summaries[0]?.id;
+      const active = firstId ? await loadProjectFromStorage(firstId) : null;
+      const rebalanced = computeRebalance(active);
+
+      set({
+        initialized: true,
+        projects: summaries,
+        activeProject: active ? { ...active, items: rebalanced.items } : null,
+        rebalance: rebalanced,
+        selectedItemId: null,
+        past: [],
+        future: [],
+      });
+    },
+
+    selectProject: async (projectId) => {
+      const loaded = await loadProjectFromStorage(projectId);
+      if (!loaded) {
+        get().notify('无法加载该拼团工程。', 'error');
+        return;
+      }
+      const rebalanced = computeRebalance(loaded);
+      set({
+        activeProject: { ...loaded, items: rebalanced.items },
+        rebalance: rebalanced,
+        selectedItemId: null,
+        canvasMode: 'select',
+        past: [],
+        future: [],
+      });
+    },
+
+    createBlankProject: async () => {
+      const now = new Date().toISOString();
+      const blank: GachaProject = {
+        version: 1,
+        id: createUuid(),
+        name: `新拼团 ${new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })}`,
+        ipName: '',
+        category: '吧唧',
+        updatedAt: now,
+        naturalWidth: 0,
+        naturalHeight: 0,
+        imageDataUrl: '',
+        cost: {
+          mode: 'direct',
+          targetTotal: 200,
+          foreignPrice: 4000,
+          exchangeRate: 0.048,
+          shippingFee: 30,
+          feeRate: 0.01,
+          step: 1,
+        },
+        items: [],
+      };
+      const summary = await saveProjectToStorage(blank);
+      set((s) => ({
+        projects: [summary, ...s.projects.filter((p) => p.id !== summary.id)],
+        activeProject: blank,
+        rebalance: computeRebalance(blank),
+        selectedItemId: null,
+        canvasMode: 'select',
+        past: [],
+        future: [],
+      }));
+      get().notify('已新建空白拼团，按 Ctrl+V 可直接粘贴截图。', 'info');
+    },
+
+    deleteProject: async (projectId) => {
+      await deleteProjectFromStorage(projectId);
+      const remaining = get().projects.filter((p) => p.id !== projectId);
+      const wasActive = get().activeProject?.id === projectId;
+
+      if (wasActive) {
+        if (remaining.length > 0) {
+          const nextProj = await loadProjectFromStorage(remaining[0].id);
+          const rebalanced = computeRebalance(nextProj);
+          set({
+            projects: remaining,
+            activeProject: nextProj ? { ...nextProj, items: rebalanced.items } : null,
+            rebalance: rebalanced,
+            selectedItemId: null,
+            past: [],
+            future: [],
+          });
+        } else {
+          set({ projects: [], activeProject: null, selectedItemId: null, past: [], future: [] });
+          await get().createBlankProject();
+        }
+      } else {
+        set({ projects: remaining });
+      }
+      get().notify('已删除该拼团记录。', 'info');
+    },
+
+    loadImageIntoActiveProject: async (imageDataUrl, suggestedName) => {
+      try {
+        const img = await loadImageElement(imageDataUrl);
+        const thumbDataUrl = await createThumbnailDataUrl(imageDataUrl, 320);
+
+        if (!get().activeProject) {
+          await get().createBlankProject();
+        }
+
+        const current = get().activeProject!;
+        const updated: GachaProject = {
+          ...current,
+          name:
+            suggestedName && (!current.imageDataUrl || current.name.startsWith('新拼团'))
+              ? suggestedName.replace(/\.[^.]+$/, '').slice(0, 32)
+              : current.name,
+          imageDataUrl,
+          thumbDataUrl,
+          naturalWidth: img.naturalWidth || 1200,
+          naturalHeight: img.naturalHeight || 900,
+          updatedAt: new Date().toISOString(),
+        };
+
+        const rebalanced = computeRebalance(updated);
+        const finalProj = { ...updated, items: rebalanced.items };
+        const summary = await saveProjectToStorage(finalProj);
+
+        set((s) => ({
+          activeProject: finalProj,
+          rebalance: rebalanced,
+          projects: [summary, ...s.projects.filter((p) => p.id !== summary.id)],
+        }));
+        get().notify('图片已载入画布，可点击「AI 识图」或「网格打点」。', 'success');
+      } catch (err) {
+        get().notify(err instanceof Error ? err.message : '图片载入失败', 'error');
+      }
+    },
+
+    updateProjectMeta: (patch) => {
+      applyMutation((proj) => ({ ...proj, ...patch }), { pushHistory: false, rebalanceNow: false });
+    },
+
+    updateCostConfig: (patch) => {
+      applyMutation((proj) => {
+        const nextCost: CostConfig = { ...proj.cost, ...patch };
+        if (nextCost.mode === 'foreign') {
+          nextCost.targetTotal = calcTargetTotal(nextCost);
+        }
+        return { ...proj, cost: nextCost };
+      });
+    },
+
+    setSelectedItemId: (id) => set({ selectedItemId: id }),
+    setCanvasMode: (mode) => set({ canvasMode: mode }),
+
+    addPinAt: (x, y) => {
+      const clampedX = Math.min(0.97, Math.max(0.03, Math.round(x * 10000) / 10000));
+      const clampedY = Math.min(0.96, Math.max(0.04, Math.round(y * 10000) / 10000));
+      const newId = createUuid();
+      applyMutation((proj) => {
+        const newItem: GoodItem = {
+          id: newId,
+          x: clampedX,
+          y: clampedY,
+          label: `谷子${proj.items.length + 1}`,
+          weight: 1.0,
+          quantity: 1,
+          price: 0,
+          locked: false,
+          tag: '',
+          weightSource: 'manual',
+        };
+        return { ...proj, items: [...proj.items, newItem] };
+      });
+      set({ selectedItemId: newId });
+    },
+
+    generateGridPins: (rows, cols, replaceExisting) => {
+      const safeRows = Math.min(10, Math.max(1, Math.floor(rows)));
+      const safeCols = Math.min(10, Math.max(1, Math.floor(cols)));
+      applyMutation((proj) => {
+        const baseCount = replaceExisting ? 0 : proj.items.length;
+        const generated: GoodItem[] = [];
+        for (let r = 0; r < safeRows; r++) {
+          for (let c = 0; c < safeCols; c++) {
+            const x = Math.round(((c + 0.5) / safeCols) * 0.84 + 0.08 * 1) * 0 + ((c + 0.5) / safeCols) * 0.84 + 0.08;
+            const y = ((r + 0.72) / safeRows) * 0.84 + 0.08;
+            const idx = baseCount + r * safeCols + c + 1;
+            generated.push({
+              id: createUuid(),
+              x: Math.round(x * 10000) / 10000,
+              y: Math.round(Math.min(0.95, y) * 10000) / 10000,
+              label: `谷子${idx}`,
+              weight: 1.0,
+              quantity: 1,
+              price: 0,
+              locked: false,
+              tag: '',
+              weightSource: 'manual',
+            });
+          }
+        }
+        return {
+          ...proj,
+          items: replaceExisting ? generated : [...proj.items, ...generated],
+        };
+      });
+      set({ selectedItemId: null, canvasMode: 'select' });
+      get().notify(`已生成 ${safeRows}×${safeCols} 共 ${safeRows * safeCols} 个网格打点并自动平账。`, 'success');
+    },
+
+    movePinPosition: (id, x, y, commitHistory = false) => {
+      const clampedX = Math.min(0.97, Math.max(0.03, Math.round(x * 10000) / 10000));
+      const clampedY = Math.min(0.96, Math.max(0.04, Math.round(y * 10000) / 10000));
+      applyMutation(
+        (proj) => ({
+          ...proj,
+          items: proj.items.map((it) => (it.id === id ? { ...it, x: clampedX, y: clampedY } : it)),
+        }),
+        { pushHistory: commitHistory, rebalanceNow: false }
+      );
+    },
+
+    updateItemPriceAndLock: (id, price) => {
+      const safePrice = Math.max(0, Number.isFinite(price) ? Math.round(price * 100) / 100 : 0);
+      applyMutation((proj) => ({
+        ...proj,
+        items: proj.items.map((it) =>
+          it.id === id ? { ...it, price: safePrice, locked: true } : it
+        ),
+      }));
+    },
+
+    adjustItemPriceStep: (id, delta) => {
+      const current = get().activeProject?.items.find((it) => it.id === id);
+      if (!current) return;
+      const nextPrice = Math.max(0, Math.round((current.price + delta) * 100) / 100);
+      get().updateItemPriceAndLock(id, nextPrice);
+    },
+
+    toggleItemLock: (id) => {
+      applyMutation((proj) => ({
+        ...proj,
+        items: proj.items.map((it) => (it.id === id ? { ...it, locked: !it.locked } : it)),
+      }));
+    },
+
+    updateItemField: (id, patch) => {
+      applyMutation((proj) => ({
+        ...proj,
+        items: proj.items.map((it) => {
+          if (it.id !== id) return it;
+          const next = { ...it, ...patch };
+          if (patch.weight !== undefined) {
+            next.weight = Math.max(0.05, Math.min(5, patch.weight));
+            next.weightSource = 'manual';
+          }
+          if (patch.tag !== undefined) {
+            next.tag = patch.tag as PinTag;
+          }
+          return next;
+        }),
+      }));
+    },
+
+    deleteItem: (id) => {
+      applyMutation((proj) => ({
+        ...proj,
+        items: proj.items.filter((it) => it.id !== id),
+      }));
+      if (get().selectedItemId === id) {
+        set({ selectedItemId: null });
+      }
+    },
+
+    unlockAllItems: () => {
+      applyMutation((proj) => ({
+        ...proj,
+        items: proj.items.map((it) => ({ ...it, locked: false })),
+      }));
+      get().notify('已解锁全部单品并重新平账。', 'info');
+    },
+
+    resetEqualWeights: () => {
+      applyMutation((proj) => ({
+        ...proj,
+        items: proj.items.map((it) => ({
+          ...it,
+          weight: 1.0,
+          locked: false,
+          weightSource: 'manual',
+        })),
+      }));
+      get().notify('已重置所有单品为均价权重。', 'info');
+    },
+
+    runAiDetect: async () => {
+      const { activeProject, settings, isDetecting } = get();
+      if (isDetecting) return;
+      if (!activeProject || !activeProject.imageDataUrl) {
+        get().notify('请先粘贴或上传一张谷子拼团图后再识图。', 'warning');
+        return;
+      }
+
+      set({ isDetecting: true });
+      try {
+        const blob = await prepareImageBlobForDetect(activeProject.imageDataUrl);
+        const result = await detectGoodsApi({
+          imageBlob: blob,
+          inviteCode: settings.inviteCode,
+          ipHint: activeProject.ipName,
+          category: activeProject.category,
+        });
+
+        applyMutation((proj) => ({
+          ...proj,
+          ipName: result.ipName || proj.ipName,
+          items: result.items.map((it) => ({
+            id: createUuid(),
+            x: it.x,
+            y: it.y,
+            box: it.box,
+            label: it.label,
+            weight: it.weight,
+            quantity: 1,
+            price: 0,
+            locked: false,
+            tag: it.weight >= 1.35 ? '热烫' : it.weight <= 0.72 ? '捆物' : '',
+            weightSource: it.weightSource,
+          })),
+        }));
+
+        const marketHitCount = result.items.filter((it) => it.weightSource === 'market_db').length;
+        set({ quota: result.quota ?? get().quota, selectedItemId: null });
+        get().notify(
+          `AI 识别出 ${result.items.length} 个谷子（${result.ipName}）${marketHitCount > 0 ? `，其中 ${marketHitCount} 个命中历史行情库` : ''}。`,
+          'success'
+        );
+      } catch (err) {
+        get().notify(err instanceof Error ? err.message : 'AI 识图失败', 'error');
+      } finally {
+        set({ isDetecting: false });
+      }
+    },
+
+    contributeCurrentProjectQuietly: async () => {
+      const { activeProject, rebalance, settings } = get();
+      if (!settings.contributeMarket || !activeProject || !activeProject.ipName.trim()) return;
+      const validItems = rebalance.items.filter((it) => it.quantity > 0 && it.price > 0);
+      if (validItems.length < 2) return;
+      const avgPrice = calcEffectiveAvgPrice(validItems);
+      if (avgPrice <= 0) return;
+
+      try {
+        await contributeMarketApi({
+          inviteCode: settings.inviteCode,
+          projectId: activeProject.id,
+          ipName: activeProject.ipName,
+          category: activeProject.category,
+          avgPrice,
+          items: validItems.map((it) => ({
+            label: it.label,
+            finalPrice: it.price,
+          })),
+        });
+      } catch {
+        // Silent failure: never disrupt local export UX
+      }
+    },
+
+    undo: () => {
+      const { past, activeProject, future } = get();
+      if (past.length === 0 || !activeProject) return;
+      const previous = past[past.length - 1];
+      const currentSnap = snapshotOf(activeProject);
+      const restored: GachaProject = {
+        ...activeProject,
+        cost: previous.cost,
+        items: previous.items,
+        name: previous.name,
+        ipName: previous.ipName,
+        category: previous.category,
+        updatedAt: new Date().toISOString(),
+      };
+      const rebalanced = computeRebalance(restored);
+      const finalProject = { ...restored, items: rebalanced.items };
+
+      set({
+        activeProject: finalProject,
+        rebalance: rebalanced,
+        past: past.slice(0, -1),
+        future: [currentSnap, ...future.slice(0, MAX_HISTORY - 1)],
+      });
+      scheduleProjectSave(finalProject, (summary) => {
+        set((s) => ({
+          projects: [summary, ...s.projects.filter((p) => p.id !== summary.id)],
+        }));
+      });
+    },
+
+    redo: () => {
+      const { future, activeProject, past } = get();
+      if (future.length === 0 || !activeProject) return;
+      const next = future[0];
+      const currentSnap = snapshotOf(activeProject);
+      const restored: GachaProject = {
+        ...activeProject,
+        cost: next.cost,
+        items: next.items,
+        name: next.name,
+        ipName: next.ipName,
+        category: next.category,
+        updatedAt: new Date().toISOString(),
+      };
+      const rebalanced = computeRebalance(restored);
+      const finalProject = { ...restored, items: rebalanced.items };
+
+      set({
+        activeProject: finalProject,
+        rebalance: rebalanced,
+        past: [...past.slice(-(MAX_HISTORY - 1)), currentSnap],
+        future: future.slice(1),
+      });
+      scheduleProjectSave(finalProject, (summary) => {
+        set((s) => ({
+          projects: [summary, ...s.projects.filter((p) => p.id !== summary.id)],
+        }));
+      });
+    },
+
+    updateSettings: (patch) => {
+      const next: AppSettings = { ...get().settings, ...patch };
+      savePersistedSettings(next);
+      set({ settings: next });
+    },
+
+    updateExportConfig: (patch) => {
+      const current = get().settings;
+      const next: AppSettings = {
+        ...current,
+        exportConfig: { ...current.exportConfig, ...patch },
+      };
+      savePersistedSettings(next);
+      set({ settings: next });
+    },
+
+    setQuota: (quota) => set({ quota }),
+  };
+});

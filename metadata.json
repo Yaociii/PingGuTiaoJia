@@ -1,0 +1,6 @@
+{
+  "name": "Gacha Pricer · 谷子看图自动调价",
+  "description": "面向谷圈拼团团长的看图自动调价工作台：AI 识图打点、历史行情权重融合、改价即锁总价守恒平账、盲抽配比二调与高清出图。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
