@@ -11,8 +11,10 @@ import {
   Redo2,
   Sparkles,
   Undo2,
+  Wand2,
 } from 'lucide-react';
 import { usePricerStore } from '../store/usePricerStore';
+import type { SettingsModalTab } from './SettingsMarketModal';
 
 interface TopBarProps {
   sidebarOpen: boolean;
@@ -20,7 +22,7 @@ interface TopBarProps {
   onOpenGridModal: () => void;
   onOpenSettlementModal: () => void;
   onOpenExportModal: () => void;
-  onOpenSettingsModal: (defaultTab?: 'settings' | 'market') => void;
+  onOpenSettingsModal: (defaultTab?: SettingsModalTab) => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -35,16 +37,19 @@ export const TopBar: React.FC<TopBarProps> = ({
   const canvasMode = usePricerStore((s) => s.canvasMode);
   const setCanvasMode = usePricerStore((s) => s.setCanvasMode);
   const isDetecting = usePricerStore((s) => s.isDetecting);
+  const isAutoPricing = usePricerStore((s) => s.isAutoPricing);
   const runAiDetect = usePricerStore((s) => s.runAiDetect);
+  const runAiAutoPrice = usePricerStore((s) => s.runAiAutoPrice);
   const pastCount = usePricerStore((s) => s.past.length);
   const futureCount = usePricerStore((s) => s.future.length);
   const undo = usePricerStore((s) => s.undo);
   const redo = usePricerStore((s) => s.redo);
 
   const hasImage = Boolean(activeProject?.imageDataUrl);
+  const canAutoPrice = Boolean(activeProject && activeProject.items.length >= 2);
 
   return (
-    <header className="h-14 shrink-0 bg-white border-b border-[#E4E7EC] px-4 flex items-center justify-between gap-6 z-20">
+    <header className="h-14 shrink-0 bg-white border-b border-[#E4E7EC] px-4 flex items-center justify-between gap-4 z-20">
       {/* Zone 1: Brand & Contextual Breadcrumb */}
       <div className="flex items-center gap-3 min-w-0">
         <button
@@ -64,7 +69,7 @@ export const TopBar: React.FC<TopBarProps> = ({
               <span className="text-slate-300 select-none shrink-0" aria-hidden="true">
                 /
               </span>
-              <span className="text-sm font-medium text-slate-600 truncate max-w-[180px] xl:max-w-[260px]">
+              <span className="text-sm font-medium text-slate-600 truncate max-w-[150px] xl:max-w-[230px]">
                 {activeProject.name}
               </span>
             </>
@@ -73,26 +78,41 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
 
       {/* Zone 2: Studio Workbench Controls (single-line) */}
-      <nav aria-label="画布工具栏" className="hidden lg:flex items-center gap-1.5">
+      <nav aria-label="画布工具栏" className="hidden lg:flex items-center gap-1">
         <button
           type="button"
           onClick={() => void runAiDetect()}
           disabled={!hasImage || isDetecting}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 disabled:opacity-45 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 disabled:opacity-45 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
         >
           {isDetecting ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
           ) : (
             <Sparkles className="w-3.5 h-3.5" />
           )}
-          <span>{isDetecting ? 'AI 识图中...' : 'AI 识图'}</span>
+          <span>{isDetecting ? '识图中...' : 'AI 识图'}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => void runAiAutoPrice()}
+          disabled={!canAutoPrice || isAutoPricing}
+          title="结合角色热度与历史行情自动分配权重并平账（已锁定单品保持原价）"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-45 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
+        >
+          {isAutoPricing ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Wand2 className="w-3.5 h-3.5" />
+          )}
+          <span>{isAutoPricing ? '调价中...' : 'AI 调价'}</span>
         </button>
 
         <button
           type="button"
           onClick={onOpenGridModal}
           disabled={!hasImage}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 disabled:opacity-40 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 disabled:opacity-40 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
         >
           <Grid2x2 className="w-3.5 h-3.5" />
           <span>网格打点</span>
@@ -103,7 +123,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           onClick={() => setCanvasMode(canvasMode === 'add_pin' ? 'select' : 'add_pin')}
           disabled={!hasImage}
           aria-pressed={canvasMode === 'add_pin'}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:pointer-events-none ${
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:pointer-events-none ${
             canvasMode === 'add_pin'
               ? 'bg-slate-900 text-white'
               : 'text-slate-700 hover:text-slate-950 hover:bg-slate-100'
@@ -114,16 +134,16 @@ export const TopBar: React.FC<TopBarProps> = ({
           ) : (
             <PlusCircle className="w-3.5 h-3.5" />
           )}
-          <span>{canvasMode === 'add_pin' ? '正在加点（点图新增）' : '手动加点'}</span>
+          <span>{canvasMode === 'add_pin' ? '点图加点中' : '手动加点'}</span>
         </button>
 
-        <span className="h-4 w-px bg-slate-200 mx-1" aria-hidden="true" />
+        <span className="h-4 w-px bg-slate-200 mx-0.5" aria-hidden="true" />
 
         <button
           type="button"
           onClick={onOpenSettlementModal}
           disabled={!activeProject || activeProject.items.length === 0}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 disabled:opacity-40 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 disabled:opacity-40 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
         >
           <Calculator className="w-3.5 h-3.5" />
           <span>盲抽二调</span>
@@ -132,13 +152,13 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           type="button"
           onClick={() => onOpenSettingsModal('market')}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0"
         >
           <Database className="w-3.5 h-3.5" />
           <span>行情库</span>
         </button>
 
-        <span className="h-4 w-px bg-slate-200 mx-1" aria-hidden="true" />
+        <span className="h-4 w-px bg-slate-200 mx-0.5" aria-hidden="true" />
 
         <button
           type="button"

@@ -6,6 +6,7 @@ import {
   Loader2,
   PlusCircle,
   Sparkles,
+  Wand2,
   X,
 } from 'lucide-react';
 import { usePricerStore } from './store/usePricerStore';
@@ -16,7 +17,7 @@ import { InspectorPanel } from './components/InspectorPanel';
 import { GridPinModal } from './components/GridPinModal';
 import { SecondarySettlementModal } from './components/SecondarySettlementModal';
 import { ExportModal } from './components/ExportModal';
-import { SettingsMarketModal } from './components/SettingsMarketModal';
+import { SettingsMarketModal, type SettingsModalTab } from './components/SettingsMarketModal';
 
 export default function App() {
   const initWorkspace = usePricerStore((s) => s.initWorkspace);
@@ -31,7 +32,9 @@ export default function App() {
   const canvasMode = usePricerStore((s) => s.canvasMode);
   const setCanvasMode = usePricerStore((s) => s.setCanvasMode);
   const isDetecting = usePricerStore((s) => s.isDetecting);
+  const isAutoPricing = usePricerStore((s) => s.isAutoPricing);
   const runAiDetect = usePricerStore((s) => s.runAiDetect);
+  const runAiAutoPrice = usePricerStore((s) => s.runAiAutoPrice);
 
   const [sidebarOpen, setSidebarOpen] = useState(
     () => typeof window === 'undefined' || window.innerWidth >= 1024
@@ -42,8 +45,8 @@ export default function App() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [settingsModal, setSettingsModal] = useState<{
     open: boolean;
-    tab: 'settings' | 'market';
-  }>({ open: false, tab: 'market' });
+    tab: SettingsModalTab;
+  }>({ open: false, tab: 'ai' });
 
   // Bootstrap workspace & projects from IndexedDB (with seeded flagship demo)
   useEffect(() => {
@@ -113,6 +116,7 @@ export default function App() {
   }, [loadImageIntoActiveProject, undo, redo, selectedItemId, deleteItem]);
 
   const hasImage = Boolean(activeProject?.imageDataUrl);
+  const canAutoPrice = Boolean(activeProject && activeProject.items.length >= 2);
 
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-[#F6F7F9] text-slate-900">
@@ -122,7 +126,7 @@ export default function App() {
         onOpenGridModal={() => setGridModalOpen(true)}
         onOpenSettlementModal={() => setSettlementModalOpen(true)}
         onOpenExportModal={() => setExportModalOpen(true)}
-        onOpenSettingsModal={(tab = 'settings') => setSettingsModal({ open: true, tab })}
+        onOpenSettingsModal={(tab = 'ai') => setSettingsModal({ open: true, tab })}
       />
 
       {/* Compact mobile/tablet quick action bar (< lg) */}
@@ -136,6 +140,15 @@ export default function App() {
           >
             {isDetecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
             <span>AI 识图</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void runAiAutoPrice()}
+            disabled={!canAutoPrice || isAutoPricing}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 whitespace-nowrap shrink-0 disabled:opacity-40"
+          >
+            {isAutoPricing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+            <span>AI 调价</span>
           </button>
           <button
             type="button"
@@ -203,7 +216,7 @@ export default function App() {
         <div className={sidebarOpen ? 'fixed inset-y-14 left-0 z-30 md:static md:inset-auto h-[calc(100vh-56px)] md:h-full shadow-xl md:shadow-none' : 'hidden'}>
           <ProjectSidebar
             open={sidebarOpen}
-            onOpenSettings={() => setSettingsModal({ open: true, tab: 'settings' })}
+            onOpenSettings={() => setSettingsModal({ open: true, tab: 'ai' })}
           />
         </div>
         <div className={`${mobilePane === 'canvas' ? 'flex' : 'hidden'} md:flex flex-1 min-w-0 h-full`}>

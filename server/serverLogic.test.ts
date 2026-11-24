@@ -118,3 +118,70 @@ test('isPlaceholderLabel filters default placeholder names', () => {
   assert.equal(isPlaceholderLabel('谷子1'), true);
   assert.equal(isPlaceholderLabel('孤爪研磨'), false);
 });
+
+import {
+  resolveAnthropicEndpoint,
+  resolveGeminiEndpoint,
+  resolveOpenAiChatEndpoint,
+  validateSafeExternalBaseUrl,
+} from './vlmProvider';
+import { parseAutoPriceResponseText } from './vlmParser';
+
+test('validateSafeExternalBaseUrl blocks SSRF / non-HTTPS / private IPs and allows public HTTPS endpoints', () => {
+  const blocked = [
+    'http://api.openai.com/v1',
+    'https://localhost:8080/v1',
+    'https://127.0.0.1/v1',
+    'https://169.254.169.254/latest/meta-data',
+    'https://10.0.0.5/v1',
+    'https://192.168.1.10/v1',
+    'https://172.16.0.1/v1',
+    'https://[::1]/v1',
+    'https://user:pass@api.openai.com/v1',
+    'https://metadata.google.internal/v1',
+  ];
+  for (const url of blocked) {
+    assert.throws(() => validateSafeExternalBaseUrl(url), `Expected SSRF block for ${url}`);
+  }
+
+  assert.equal(
+    resolveOpenAiChatEndpoint('https://dashscope.aliyuncs.com/compatible-mode/v1/'),
+    'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
+  );
+  assert.equal(
+    resolveOpenAiChatEndpoint('https://api.openai.com/v1/chat/completions'),
+    'https://api.openai.com/v1/chat/completions'
+  );
+  assert.equal(
+    resolveGeminiEndpoint('https://generativelanguage.googleapis.com', 'gemini-2.5-flash'),
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+  );
+  assert.equal(
+    resolveAnthropicEndpoint('https://api.anthropic.com'),
+    'https://api.anthropic.com/v1/messages'
+  );
+});
+
+test('parseAutoPriceResponseText parses dirty JSON, maps by id, and sanitizes tags and weights', () => {
+  const input = [
+    { id: 'a1', label: '孤爪研磨', locked: false, price: 30, quantity: 1, weight: 1, tag: '' },
+    { id: 'a2', label: '犬冈走', locked: false, price: 30, quantity: 1, weight: 1, tag: '' },
+  ];
+  const raw = `\`\`\`json
+  {
+    "ip_name": "排球少年",
+    "summary": "热门上浮，冷门下调",
+    "items": [
+      { "id": "a1", "label": "孤爪研磨", "weight": 3.5, "tag": "热烫", "reason": "超人气", },
+      { "id": "a2", "label": "犬冈走", "weight": 0.55, "tag": "非法标记", "reason": "冷门", },
+    ],
+  }
+  \`\`\``;
+  const parsed = parseAutoPriceResponseText(raw, input);
+  assert.equal(parsed.ip_name, '排球少年');
+  assert.equal(parsed.items[0].weight, 2.5); // clamped
+  assert.equal(parsed.items[0].tag, '热烫');
+  assert.equal(parsed.items[1].weight, 0.55);
+  assert.equal(parsed.items[1].tag, ''); // invalid tag sanitized
+});
+

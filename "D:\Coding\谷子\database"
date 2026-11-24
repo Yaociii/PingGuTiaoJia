@@ -1,0 +1,245 @@
+{
+  "nextStatId": 19,
+  "nextContributionId": 1,
+  "nextLogId": 5,
+  "invite_codes": {
+    "Gmy071014": {
+      "code": "Gmy071014",
+      "owner_note": "默认本地邀请码",
+      "daily_limit": 20,
+      "used_today": 4,
+      "last_reset_date": "2026-11-24",
+      "is_active": true,
+      "created_at": "2026-11-24T08:17:48.509Z"
+    }
+  },
+  "character_market_stats": [
+    {
+      "id": 1,
+      "ip_name": "幻境物语",
+      "character_name": "紫晶魔女",
+      "normalized_key": "紫晶魔女",
+      "category": "立牌",
+      "avg_weight_ratio": 1.48,
+      "sample_count": 18,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 2,
+      "ip_name": "幻境物语",
+      "character_name": "苍蓝剑士",
+      "normalized_key": "苍蓝剑士",
+      "category": "立牌",
+      "avg_weight_ratio": 1.24,
+      "sample_count": 15,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 3,
+      "ip_name": "幻境物语",
+      "character_name": "圣洁祭司",
+      "normalized_key": "圣洁祭司",
+      "category": "立牌",
+      "avg_weight_ratio": 1.12,
+      "sample_count": 11,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 4,
+      "ip_name": "幻境物语",
+      "character_name": "绯红骑士",
+      "normalized_key": "绯红骑士",
+      "category": "立牌",
+      "avg_weight_ratio": 0.94,
+      "sample_count": 9,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 5,
+      "ip_name": "幻境物语",
+      "character_name": "精灵射手",
+      "normalized_key": "精灵射手",
+      "category": "立牌",
+      "avg_weight_ratio": 0.72,
+      "sample_count": 10,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 6,
+      "ip_name": "幻境物语",
+      "character_name": "翠影游侠",
+      "normalized_key": "翠影游侠",
+      "category": "立牌",
+      "avg_weight_ratio": 0.56,
+      "sample_count": 8,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 7,
+      "ip_name": "排球少年",
+      "character_name": "孤爪研磨",
+      "normalized_key": "孤爪研磨",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.54,
+      "sample_count": 24,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 8,
+      "ip_name": "排球少年",
+      "character_name": "黑尾铁朗",
+      "normalized_key": "黑尾铁朗",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.38,
+      "sample_count": 21,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 9,
+      "ip_name": "排球少年",
+      "character_name": "及川彻",
+      "normalized_key": "及川彻",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.42,
+      "sample_count": 19,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 10,
+      "ip_name": "排球少年",
+      "character_name": "日向翔阳",
+      "normalized_key": "日向翔阳",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.15,
+      "sample_count": 17,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 11,
+      "ip_name": "排球少年",
+      "character_name": "影山飞雄",
+      "normalized_key": "影山飞雄",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.18,
+      "sample_count": 16,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 12,
+      "ip_name": "排球少年",
+      "character_name": "月岛萤",
+      "normalized_key": "月岛萤",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.1,
+      "sample_count": 14,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 13,
+      "ip_name": "排球少年",
+      "character_name": "夜久卫辅",
+      "normalized_key": "夜久卫辅",
+      "category": "吧唧",
+      "avg_weight_ratio": 0.78,
+      "sample_count": 12,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 14,
+      "ip_name": "排球少年",
+      "character_name": "犬冈走",
+      "normalized_key": "犬冈走",
+      "category": "吧唧",
+      "avg_weight_ratio": 0.55,
+      "sample_count": 11,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 15,
+      "ip_name": "蓝色监狱",
+      "character_name": "凪诚士郎",
+      "normalized_key": "凪诚士郎",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.46,
+      "sample_count": 15,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 16,
+      "ip_name": "蓝色监狱",
+      "character_name": "糸师凛",
+      "normalized_key": "糸师凛",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.4,
+      "sample_count": 14,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 17,
+      "ip_name": "蓝色监狱",
+      "character_name": "洁世一",
+      "normalized_key": "洁世一",
+      "category": "吧唧",
+      "avg_weight_ratio": 1.16,
+      "sample_count": 12,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    },
+    {
+      "id": 18,
+      "ip_name": "蓝色监狱",
+      "character_name": "蜂乐回",
+      "normalized_key": "蜂乐回",
+      "category": "吧唧",
+      "avg_weight_ratio": 0.92,
+      "sample_count": 9,
+      "updated_at": "2026-11-24T08:17:48.508Z"
+    }
+  ],
+  "market_contributions": [],
+  "detect_logs": [
+    {
+      "token_code": "Gmy071014",
+      "provider": "server_default",
+      "model": "gemini-4-hydrogen",
+      "detected_count": 16,
+      "latency_ms": 95100,
+      "status": "ok",
+      "error_msg": null,
+      "id": 1,
+      "created_at": "2026-11-24T10:33:01.584Z"
+    },
+    {
+      "token_code": "Gmy071014",
+      "provider": "server_default",
+      "model": "gemini-4-hydrogen",
+      "detected_count": 16,
+      "latency_ms": 9018,
+      "status": "ok",
+      "error_msg": null,
+      "id": 2,
+      "created_at": "2026-11-24T10:34:11.332Z"
+    },
+    {
+      "token_code": "Gmy071014",
+      "provider": "server_default",
+      "model": "gemini-4-hydrogen",
+      "detected_count": 8,
+      "latency_ms": 37497,
+      "status": "ok",
+      "error_msg": null,
+      "id": 3,
+      "created_at": "2026-11-24T10:40:12.845Z"
+    },
+    {
+      "token_code": "Gmy071014",
+      "provider": "server_default",
+      "model": "gemini-4-hydrogen",
+      "detected_count": 16,
+      "latency_ms": 168291,
+      "status": "ok",
+      "error_msg": null,
+      "id": 4,
+      "created_at": "2026-11-24T10:40:50.889Z"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Image as ImageIcon, Plus, Settings, Trash2 } from 'lucide-react';
+import { Image as ImageIcon, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { usePricerStore } from '../store/usePricerStore';
 import { formatMoney } from '../core/rebalancer';
 
@@ -22,6 +22,12 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({ open, onOpenSett
   const selectProject = usePricerStore((s) => s.selectProject);
   const createBlankProject = usePricerStore((s) => s.createBlankProject);
   const deleteProject = usePricerStore((s) => s.deleteProject);
+  const aiConfig = usePricerStore((s) => s.settings.aiConfig);
+
+  const engineLabel =
+    aiConfig.protocol === 'server_default'
+      ? '默认 Gemini'
+      : `自定义 · ${aiConfig.model.trim() || aiConfig.protocol}`;
 
   if (!open) return null;
 
@@ -110,16 +116,19 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({ open, onOpenSett
         })}
       </div>
 
-      <div className="p-3 border-t border-[#EEF0F4] space-y-2">
+      <div className="p-3 border-t border-[#EEF0F4] space-y-1.5">
         <button
           type="button"
           onClick={onOpenSettings}
-          className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs font-medium text-slate-600 hover:text-slate-950 hover:bg-slate-100 transition-colors"
+          className="w-full text-left px-2.5 py-2 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors"
         >
           <span className="inline-flex items-center gap-2">
-            <Settings className="w-3.5 h-3.5" />
-            <span>服务设置与邀请码</span>
+            <KeyRound className="w-3.5 h-3.5 text-slate-500" />
+            <span>AI 密钥与服务设置</span>
           </span>
+          <div className="mt-0.5 pl-5.5 text-[11px] font-normal text-slate-400 truncate">
+            当前引擎：{engineLabel}
+          </div>
         </button>
         <p className="px-2.5 text-[11px] leading-relaxed text-slate-400">
           支持 Ctrl+V 直接粘贴截图、拖拽防挡脸、Ctrl+Z 撤回。

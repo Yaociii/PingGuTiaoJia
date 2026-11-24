@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import type {
+  AiProtocol,
+  AiProviderConfig,
   AppSettings,
   CostConfig,
   ExportConfig,
@@ -20,10 +22,11 @@ import {
 } from '../core/projectStorage';
 import { createSeedDemoProjects } from '../core/demoProjects';
 import { createThumbnailDataUrl, loadImageElement, prepareImageBlobForDetect } from '../core/canvasExport';
-import { contributeMarketApi, detectGoodsApi } from '../api/client';
+import { autoPriceGoodsApi, contributeMarketApi, detectGoodsApi } from '../api/client';
 
 const SETTINGS_STORAGE_KEY = 'gacha_pricer_settings_v1';
 const MAX_HISTORY = 50;
+const VALID_PROTOCOLS: AiProtocol[] = ['server_default', 'openai_compatible', 'gemini', 'anthropic'];
 
 interface HistorySnapshot {
   cost: CostConfig;
@@ -39,6 +42,13 @@ export interface ToastNotice {
   message: string;
 }
 
+const DEFAULT_AI_CONFIG: AiProviderConfig = {
+  protocol: 'server_default',
+  apiKey: '',
+  baseUrl: 'https://api.openai.com/v1',
+  model: 'gpt-4o-mini',
+};
+
 function loadPersistedSettings(): AppSettings {
   const defaults: AppSettings = {
     inviteCode: 'dev-local-001',
@@ -48,22 +58,46 @@ function loadPersistedSettings(): AppSettings {
       scale: 1.0,
       showTag: true,
     },
+    aiConfig: { ...DEFAULT_AI_CONFIG },
   };
   if (typeof window === 'undefined') return defaults;
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    const savedProto = parsed.aiConfig?.protocol;
+    const protocol: AiProtocol =
+      savedProto && VALID_PROTOCOLS.includes(savedProto) ? savedProto : 'server_default';
     return {
-      inviteCode: typeof parsed.inviteCode === 'string' && parsed.inviteCode.trim() ? parsed.inviteCode : defaults.inviteCode,
-      contributeMarket: typeof parsed.contributeMarket === 'boolean' ? parsed.contributeMarket : defaults.contributeMarket,
+      inviteCode:
+        typeof parsed.inviteCode === 'string' && parsed.inviteCode.trim()
+          ? parsed.inviteCode
+          : defaults.inviteCode,
+      contributeMarket:
+        typeof parsed.contributeMarket === 'boolean'
+          ? parsed.contributeMarket
+          : defaults.contributeMarket,
       exportConfig: {
-        displayMode: parsed.exportConfig?.displayMode === 'price_only' ? 'price_only' : 'label_and_price',
+        displayMode:
+          parsed.exportConfig?.displayMode === 'price_only' ? 'price_only' : 'label_and_price',
         scale:
           typeof parsed.exportConfig?.scale === 'number'
             ? Math.min(1.4, Math.max(0.8, parsed.exportConfig.scale))
             : 1.0,
-        showTag: typeof parsed.exportConfig?.showTag === 'boolean' ? parsed.exportConfig.showTag : true,
+        showTag:
+          typeof parsed.exportConfig?.showTag === 'boolean' ? parsed.exportConfig.showTag : true,
+      },
+      aiConfig: {
+        protocol,
+        apiKey: typeof parsed.aiConfig?.apiKey === 'string' ? parsed.aiConfig.apiKey : '',
+        baseUrl:
+          typeof parsed.aiConfig?.baseUrl === 'string' && parsed.aiConfig.baseUrl.trim()
+            ? parsed.aiConfig.baseUrl
+            : DEFAULT_AI_CONFIG.baseUrl,
+        model:
+          typeof parsed.aiConfig?.model === 'string' && parsed.aiConfig.model.trim()
+            ? parsed.aiConfig.model
+            : DEFAULT_AI_CONFIG.model,
       },
     };
   } catch {
@@ -120,6 +154,7 @@ interface PricerState {
   selectedItemId: string | null;
   canvasMode: 'select' | 'add_pin';
   isDetecting: boolean;
+  isAutoPricing: boolean;
   quota: QuotaInfo | null;
   settings: AppSettings;
   past: HistorySnapshot[];
@@ -157,12 +192,14 @@ interface PricerState {
   resetEqualWeights: () => void;
 
   runAiDetect: () => Promise<void>;
+  runAiAutoPrice: () => Promise<void>;
   contributeCurrentProjectQuietly: () => Promise<void>;
 
   undo: () => void;
   redo: () => void;
 
   updateSettings: (patch: Partial<AppSettings>) => void;
+  updateAiConfig: (patch: Partial<AiProviderConfig>) => void;
   updateExportConfig: (patch: Partial<ExportConfig>) => void;
   setQuota: (quota: QuotaInfo | null) => void;
 }
@@ -245,6 +282,7 @@ export const usePricerStore = create<PricerState>((set, get) => {
     selectedItemId: null,
     canvasMode: 'select',
     isDetecting: false,
+    isAutoPricing: false,
     quota: null,
     settings: loadPersistedSettings(),
     past: [],
@@ -583,6 +621,7 @@ export const usePricerStore = create<PricerState>((set, get) => {
         const result = await detectGoodsApi({
           imageBlob: blob,
           inviteCode: settings.inviteCode,
+          aiConfig: settings.aiConfig,
           ipHint: activeProject.ipName,
           category: activeProject.category,
         });
@@ -608,13 +647,68 @@ export const usePricerStore = create<PricerState>((set, get) => {
         const marketHitCount = result.items.filter((it) => it.weightSource === 'market_db').length;
         set({ quota: result.quota ?? get().quota, selectedItemId: null });
         get().notify(
-          `AI 识别出 ${result.items.length} 个谷子（${result.ipName}）${marketHitCount > 0 ? `，其中 ${marketHitCount} 个命中历史行情库` : ''}。`,
+          `AI（${result.providerUsed}）识别出 ${result.items.length} 个谷子（${result.ipName}）${marketHitCount > 0 ? `，其中 ${marketHitCount} 个命中历史行情库` : ''}。`,
           'success'
         );
       } catch (err) {
         get().notify(err instanceof Error ? err.message : 'AI 识图失败', 'error');
       } finally {
         set({ isDetecting: false });
+      }
+    },
+
+    runAiAutoPrice: async () => {
+      const { activeProject, rebalance, settings, isAutoPricing } = get();
+      if (isAutoPricing) return;
+      if (!activeProject || activeProject.items.length < 2) {
+        get().notify('画布中至少需要 2 个单品才能使用 AI 自动调价。', 'warning');
+        return;
+      }
+
+      set({ isAutoPricing: true });
+      try {
+        const result = await autoPriceGoodsApi({
+          inviteCode: settings.inviteCode,
+          aiConfig: settings.aiConfig,
+          ipName: activeProject.ipName,
+          category: activeProject.category,
+          targetTotal: rebalance.targetTotal,
+          items: rebalance.items,
+        });
+
+        const recById = new Map(result.items.map((r) => [r.id, r]));
+        applyMutation((proj) => ({
+          ...proj,
+          ipName: result.ipName || proj.ipName,
+          items: proj.items.map((it) => {
+            const rec = recById.get(it.id);
+            if (!rec) return it;
+            // Preserve manually locked items' prices while updating unlocked weights & tags
+            if (it.locked) {
+              return {
+                ...it,
+                tag: it.tag || rec.tag,
+              };
+            }
+            return {
+              ...it,
+              weight: rec.weight,
+              tag: rec.tag,
+              weightSource: rec.weightSource,
+            };
+          }),
+        }));
+
+        const marketHits = result.items.filter((it) => it.weightSource === 'market_db').length;
+        const summaryNote = result.summary ? `：${result.summary}` : '';
+        get().notify(
+          `AI 自动调价完成（${result.providerUsed}${marketHits > 0 ? ` · ${marketHits}项命中行情库` : ''}）${summaryNote}`,
+          'success'
+        );
+      } catch (err) {
+        get().notify(err instanceof Error ? err.message : 'AI 自动调价失败', 'error');
+      } finally {
+        set({ isAutoPricing: false });
       }
     },
 
@@ -705,6 +799,16 @@ export const usePricerStore = create<PricerState>((set, get) => {
 
     updateSettings: (patch) => {
       const next: AppSettings = { ...get().settings, ...patch };
+      savePersistedSettings(next);
+      set({ settings: next });
+    },
+
+    updateAiConfig: (patch) => {
+      const current = get().settings;
+      const next: AppSettings = {
+        ...current,
+        aiConfig: { ...current.aiConfig, ...patch },
+      };
       savePersistedSettings(next);
       set({ settings: next });
     },

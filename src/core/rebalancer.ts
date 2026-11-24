@@ -1,11 +1,15 @@
-import type {
-  CostConfig,
-  GoodItem,
-  PriceStep,
-  RebalanceResult,
-  RebalanceStatus,
-  SecondarySettlementResult,
-  SettlementRow,
+import {
+  GAMMA_MAX,
+  GAMMA_MIN,
+  WEIGHT_MAX,
+  WEIGHT_MIN,
+  type CostConfig,
+  type GoodItem,
+  type PriceStep,
+  type RebalanceResult,
+  type RebalanceStatus,
+  type SecondarySettlementResult,
+  type SettlementRow,
 } from '../types/pricing';
 
 export function roundTo2(value: number): number {
@@ -15,6 +19,28 @@ export function roundTo2(value: number): number {
 export function formatMoney(value: number): string {
   const rounded = roundTo2(value);
   return Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1).replace(/\.0$/, '');
+}
+
+export function clampWeight(weight: number): number {
+  if (!Number.isFinite(weight)) return 1.0;
+  return Math.min(WEIGHT_MAX, Math.max(WEIGHT_MIN, weight));
+}
+
+export function clampGamma(gamma?: number): number {
+  if (gamma === undefined || !Number.isFinite(gamma)) return 1.0;
+  return Math.min(GAMMA_MAX, Math.max(GAMMA_MIN, gamma));
+}
+
+/**
+ * 计算有效权重 w'_i = (clamp(weight_i, 0.1, 10.0)) ^ gamma
+ * - gamma > 1：拉大冷烫价差（烫更贵、冷更便宜）
+ * - gamma < 1：缓和冷烫价差（向均价靠拢）
+ */
+export function calcEffectiveWeight(weight: number, gamma = 1.0): number {
+  const base = clampWeight(weight);
+  const g = clampGamma(gamma);
+  const effective = Math.pow(base, g);
+  return Number.isFinite(effective) && effective > 0 ? effective : 1.0;
 }
 
 /**
@@ -66,20 +92,22 @@ interface InternalSlot {
 }
 
 function stepToMultiplier(step: PriceStep): number {
-  // Using integer scaling avoids floating-point drift (step=0.5 -> 2, step=1 -> 1, step=5 -> 0.2)
   return 1 / step;
 }
 
 /**
  * 总价守恒平账引擎（纯函数）
  * 约束：sum(price_i * quantity_i) = targetTotal
+ * V2.0 支持宽幅权重 [0.1, 10.0] 与冷烫温差系数 gamma ∈ [0.5, 2.5]
  */
 export function rebalanceItems(
   inputItems: GoodItem[],
   targetTotalRaw: number,
-  step: PriceStep = 1
+  step: PriceStep = 1,
+  gamma = 1.0
 ): RebalanceResult {
   const targetTotal = roundTo2(Math.max(0, Number.isFinite(targetTotalRaw) ? targetTotalRaw : 0));
+  const safeGamma = clampGamma(gamma);
   const items: GoodItem[] = inputItems.map((it) => ({ ...it }));
 
   // 1. 零数量项直接归零，不参与分配
@@ -170,7 +198,7 @@ export function rebalanceItems(
 
     return {
       index,
-      weight: Math.max(Number.isFinite(item.weight) ? item.weight : 1, 0.01),
+      weight: calcEffectiveWeight(item.weight, safeGamma),
       quantity: item.quantity,
       minPrice: minP,
       maxPrice: maxP,
@@ -239,7 +267,6 @@ export function rebalanceItems(
     baseStepsWeightedSum += s.units * s.quantity;
   }
 
-  // Target remaining budget expressed in integer step units (rounded to nearest step)
   const targetRemainingSteps = Math.round(remainingBudget * invStep);
   let diffSteps = targetRemainingSteps - baseStepsWeightedSum;
 
@@ -247,7 +274,6 @@ export function rebalanceItems(
 
   if (allSingleQty) {
     if (diffSteps > 0) {
-      // 按余数降序，余数相同按权重降序，优先给可增加项 +1 步
       const candidates = [...slots].sort((a, b) => {
         if (Math.abs(b.remainder - a.remainder) > 1e-9) return b.remainder - a.remainder;
         return b.weight - a.weight;
@@ -267,7 +293,6 @@ export function rebalanceItems(
         if (!progressed) break;
       }
     } else if (diffSteps < 0) {
-      // 超出时按余数升序、权重升序扣减
       const candidates = [...slots].sort((a, b) => {
         if (Math.abs(a.remainder - b.remainder) > 1e-9) return a.remainder - b.remainder;
         return a.weight - b.weight;
@@ -288,8 +313,6 @@ export function rebalanceItems(
       }
     }
   } else {
-    // 存在 Q_i > 1（盲抽二调场景）：尽量最小化 |diffSteps|，绝不死循环
-    // 先尝试单轮最大余额顺次分配，再迭代寻找严格减小 |diffSteps| 的最优调整
     const maxIterations = Math.max(32, Math.abs(diffSteps) + slots.length * 6);
     for (let iter = 0; iter < maxIterations && diffSteps !== 0; iter++) {
       let bestSlot: InternalSlot | null = null;
@@ -298,7 +321,6 @@ export function rebalanceItems(
       let bestScore = -Infinity;
 
       for (const s of slots) {
-        // 尝试 +1 步
         if (s.units < s.maxUnits) {
           const newDiff = diffSteps - s.quantity;
           const newAbs = Math.abs(newDiff);
@@ -312,7 +334,6 @@ export function rebalanceItems(
             }
           }
         }
-        // 尝试 -1 步
         if (s.units > s.minUnits) {
           const newDiff = diffSteps + s.quantity;
           const newAbs = Math.abs(newDiff);
@@ -334,7 +355,6 @@ export function rebalanceItems(
     }
   }
 
-  // 回写计算出的单价
   for (const s of slots) {
     items[s.index].price = roundTo2(s.units * step);
   }
@@ -357,6 +377,44 @@ export function rebalanceItems(
     status,
     exceedAmount: 0,
   };
+}
+
+/**
+ * V2.0 便捷盲抽二调：按端盒数或总抽数一键均分出货量（纯函数）
+ * - mode = 'boxes'：每款角色均分 boxCount 个（总件数 = 款数 * boxCount）
+ * - mode = 'total_draws'：将总抽数 totalDraws 均匀分配给参与款式，余数顺延至前几款
+ * - snapshotPrepaid = true 时自动将当前单价快照为各款的 prepaidPrice（开团预收价）
+ */
+export function distributeBlindBoxQuantities(
+  items: GoodItem[],
+  options: {
+    mode: 'boxes' | 'total_draws';
+    boxCount?: number;
+    totalDraws?: number;
+    snapshotPrepaid?: boolean;
+  }
+): GoodItem[] {
+  if (items.length === 0) return [];
+  const snapshotPrepaid = options.snapshotPrepaid !== false;
+
+  if (options.mode === 'boxes') {
+    const boxes = Math.max(1, Math.min(99, Math.floor(options.boxCount ?? 1)));
+    return items.map((it) => ({
+      ...it,
+      quantity: boxes,
+      prepaidPrice: snapshotPrepaid ? it.price : it.prepaidPrice,
+    }));
+  }
+
+  const total = Math.max(0, Math.min(999, Math.floor(options.totalDraws ?? items.length)));
+  const baseQty = Math.floor(total / items.length);
+  const remainder = total % items.length;
+
+  return items.map((it, idx) => ({
+    ...it,
+    quantity: baseQty + (idx < remainder ? 1 : 0),
+    prepaidPrice: snapshotPrepaid ? it.price : it.prepaidPrice,
+  }));
 }
 
 /**
