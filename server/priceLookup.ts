@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import type { GachaDatabase } from './db';
 import { normalizeKey } from './marketMatcher';
 import type {
@@ -80,6 +80,17 @@ function round2(v: number): number {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v));
+}
+
+async function safeParseJsonBody<T>(res: Response): Promise<T | null> {
+  try {
+    const text = await res.text();
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.startsWith('<')) return null;
+    return JSON.parse(trimmed) as T;
+  } catch {
+    return null;
+  }
 }
 
 export function sanitizeExternalUrl(raw?: string): string | undefined {
@@ -432,13 +443,27 @@ export class SearchGroundingPriceSource implements BasePriceSource {
     const todayIso = ctx.now.toISOString().slice(0, 10);
     const prompt = buildSearchExtractionPrompt(query, todayIso);
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
-    });
+    const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+    let response: Awaited<ReturnType<typeof ai.models.generateContent>> | null = null;
+    for (const model of modelsToTry) {
+      try {
+        response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            tools: [{ googleSearch: {} }],
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        });
+        break;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/503|UNAVAILABLE|high demand|overloaded/i.test(msg)) {
+          throw err;
+        }
+      }
+    }
+    if (!response) return [];
 
     const text = response.text || '';
     const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
@@ -470,8 +495,8 @@ export class SearchGroundingPriceSource implements BasePriceSource {
             signal: controller.signal,
           });
           if (!res.ok) return;
-          const data = (await res.json()) as { results?: Array<{ title?: string; content?: string; url?: string }> };
-          for (const r of data.results ?? []) {
+          const data = await safeParseJsonBody<{ results?: Array<{ title?: string; content?: string; url?: string }> }>(res);
+          for (const r of data?.results ?? []) {
             snippets.push({ title: r.title || '', snippet: r.content || '', url: r.url });
           }
         } else if (provider === 'serper') {
@@ -482,8 +507,8 @@ export class SearchGroundingPriceSource implements BasePriceSource {
             signal: controller.signal,
           });
           if (!res.ok) return;
-          const data = (await res.json()) as { organic?: Array<{ title?: string; snippet?: string; link?: string }> };
-          for (const r of data.organic ?? []) {
+          const data = await safeParseJsonBody<{ organic?: Array<{ title?: string; snippet?: string; link?: string }> }>(res);
+          for (const r of data?.organic ?? []) {
             snippets.push({ title: r.title || '', snippet: r.snippet || '', url: r.link });
           }
         } else if (provider === 'bocha') {
@@ -494,10 +519,10 @@ export class SearchGroundingPriceSource implements BasePriceSource {
             signal: controller.signal,
           });
           if (!res.ok) return;
-          const data = (await res.json()) as {
+          const data = await safeParseJsonBody<{
             data?: { webPages?: { value?: Array<{ name?: string; snippet?: string; url?: string }> } };
-          };
-          for (const r of data.data?.webPages?.value ?? []) {
+          }>(res);
+          for (const r of data?.data?.webPages?.value ?? []) {
             snippets.push({ title: r.name || '', snippet: r.snippet || '', url: r.url });
           }
         }
@@ -525,7 +550,10 @@ export class SearchGroundingPriceSource implements BasePriceSource {
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
         contents: prompt,
-        config: { responseMimeType: 'application/json' },
+        config: {
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
       return parseSamplesFromLlmJson(
         response.text || '',
@@ -626,7 +654,7 @@ export class ProxyMarketAdapter implements BasePriceSource {
         signal: controller.signal,
       });
       if (!res.ok) return [];
-      const data = (await res.json()) as { items?: Array<Record<string, unknown>> };
+      const data = await safeParseJsonBody<{ items?: Array<Record<string, unknown>> }>(res);
       const items = Array.isArray(data?.items) ? data.items : [];
       return items
         .map((it): RawMarketSample | null => {
@@ -761,6 +789,9 @@ export class PriceLookupService {
     referenceAvgMarketPrice?: number;
     customAiConfig?: CustomAiConfig;
     now?: Date;
+    maxTotalBudgetMs?: number;
+    perSourceTimeoutMs?: number;
+    concurrency?: number;
   }): Promise<{ jpyRate: number; results: ItemLookupResult[] }> {
     const now = params.now ?? new Date();
     const jpyRate =
@@ -772,18 +803,27 @@ export class PriceLookupService {
         ? Math.max(0, params.intlShippingFactor)
         : Number.parseFloat(process.env.INTL_SHIPPING_FACTOR || '0.12') || 0.12;
 
-    const ctx: PriceSourceContext = {
+    const effectiveSourceTimeoutMs =
+      params.perSourceTimeoutMs && params.perSourceTimeoutMs > 0
+        ? params.perSourceTimeoutMs
+        : this.timeoutMs;
+    const deadlineMs =
+      params.maxTotalBudgetMs && params.maxTotalBudgetMs > 0
+        ? Date.now() + params.maxTotalBudgetMs
+        : null;
+
+    const baseCtx: PriceSourceContext = {
       now,
       jpyRate,
       intlShippingFactor,
-      timeoutMs: this.timeoutMs,
+      timeoutMs: effectiveSourceTimeoutMs,
       customAiConfig: params.customAiConfig,
       fetchImpl: this.fetchImpl,
     };
 
     const enabledSources = this.sources.filter((s) => s.isEnabled());
 
-    // Execute item lookups with bounded concurrency (4 at a time)
+    // Execute item lookups with bounded concurrency and overall time-budget circuit breaker
     const rawItemResults: Array<{
       query: PriceLookupQuery;
       median: number | null;
@@ -798,11 +838,21 @@ export class PriceLookupService {
       localDbWeight?: number;
     }> = [];
 
-    const concurrency = 4;
+    const concurrency = Math.max(1, Math.min(8, params.concurrency ?? 6));
     for (let i = 0; i < params.queries.length; i += concurrency) {
       const slice = params.queries.slice(i, i + concurrency);
+      const remainingMs = deadlineMs !== null ? deadlineMs - Date.now() : null;
+      const waveSources = remainingMs !== null && remainingMs < 800 ? [] : enabledSources;
+      const waveTimeoutMs =
+        remainingMs !== null
+          ? Math.max(500, Math.min(effectiveSourceTimeoutMs, remainingMs - 200))
+          : effectiveSourceTimeoutMs;
+      const waveCtx: PriceSourceContext = {
+        ...baseCtx,
+        timeoutMs: waveTimeoutMs,
+      };
       const batchOut = await Promise.all(
-        slice.map((q) => this.lookupSingleItem(params.db, q, enabledSources, ctx))
+        slice.map((q) => this.lookupSingleItem(params.db, q, waveSources, waveCtx))
       );
       rawItemResults.push(...batchOut);
     }

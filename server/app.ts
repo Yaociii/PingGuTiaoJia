@@ -328,7 +328,7 @@ export function createApiRouter(options: {
         reply_preview: result.replyPreview,
       });
     } catch (err) {
-      res.status(502).json({
+      res.status(500).json({
         detail: err instanceof Error ? err.message : '连接测试失败',
       });
     }
@@ -394,7 +394,6 @@ export function createApiRouter(options: {
           });
           return;
         }
-        updatedToken = db.consumeQuota(tokenRecord.code, now);
       }
 
       const ipHint = typeof req.body?.ip_hint === 'string' ? req.body.ip_hint.trim().slice(0, 60) : '';
@@ -424,9 +423,13 @@ export function createApiRouter(options: {
             error_msg: '未检测到有效谷子单品',
           });
           res
-            .status(502)
+            .status(422)
             .json({ detail: '未能从图片中识别出独立的谷子单品，请尝试使用「网格打点」或手动加点。' });
           return;
+        }
+
+        if (!isByok && tokenRecord) {
+          updatedToken = db.consumeQuota(tokenRecord.code, now);
         }
 
         // V2.0 闭环：识图 -> 多源市场比价 -> IQR 清洗归一化权重 -> 本地行情库 / VLM 四级降级
@@ -447,6 +450,9 @@ export function createApiRouter(options: {
               queries,
               customAiConfig: extracted.config,
               now,
+              maxTotalBudgetMs: 18000,
+              perSourceTimeoutMs: 7500,
+              concurrency: 6,
             });
         const lookupById = new Map((lookupOut?.results ?? []).map((r) => [r.id, r]));
 
@@ -530,7 +536,7 @@ export function createApiRouter(options: {
           status: 'error',
           error_msg: message.slice(0, 200),
         });
-        res.status(502).json({ detail: `识图服务暂时不可用：${message}` });
+        res.status(500).json({ detail: `识图服务暂时不可用：${message}` });
       }
     }
   );
@@ -605,7 +611,6 @@ export function createApiRouter(options: {
         });
         return;
       }
-      db.consumeQuota(tokenRecord.code, now);
     }
 
     try {
@@ -616,6 +621,10 @@ export function createApiRouter(options: {
         items: inputItems,
         customConfig: extracted.config,
       });
+
+      if (!isByok && tokenRecord) {
+        db.consumeQuota(tokenRecord.code, now);
+      }
 
       const parsed = parseAutoPriceResponseText(rawText, inputItems, ipName);
       const effectiveIp = parsed.ip_name || ipName;
@@ -639,6 +648,9 @@ export function createApiRouter(options: {
         queries: lookupQueries,
         customAiConfig: extracted.config,
         now,
+        maxTotalBudgetMs: 22000,
+        perSourceTimeoutMs: 8500,
+        concurrency: 6,
       });
       const lookupMap = new Map(lookupOut.results.map((r) => [r.id, r]));
 
@@ -686,7 +698,7 @@ export function createApiRouter(options: {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'AI 自动调价失败';
-      res.status(502).json({ detail: `AI 自动调价暂时不可用：${message}` });
+      res.status(500).json({ detail: `AI 自动调价暂时不可用：${message}` });
     }
   });
 
@@ -771,7 +783,7 @@ export function createApiRouter(options: {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : '市场比价服务异常';
-      res.status(502).json({ detail: `自动比价暂时不可用：${message}` });
+      res.status(500).json({ detail: `自动比价暂时不可用：${message}` });
     }
   });
 
@@ -1093,7 +1105,7 @@ export function createApiRouter(options: {
         return;
       }
       if (result.reason === 'forbidden') {
-        res.status(403).json({ detail: '无权撤销该认领记录（仅团长或认领本人可操作）。' });
+        res.status(401).json({ detail: '无权撤销该认领记录（仅团长或认领本人可操作）。' });
         return;
       }
       res.status(409).json({ detail: '该记录已被撤销。' });
@@ -1167,7 +1179,7 @@ export function createApiRouter(options: {
         res.status(404).json({ detail: '未找到该在线拼团。' });
         return;
       }
-      res.status(403).json({ detail: '团长管理凭证无效，无法修改该拼团。' });
+      res.status(401).json({ detail: '团长管理凭证无效，无法修改该拼团。' });
       return;
     }
 
@@ -1178,6 +1190,35 @@ export function createApiRouter(options: {
       order: formatGroupOrderResponse(updatedBundle, true),
     });
   });
+
+  // Ensure unmatched /api/v1/* routes always return JSON rather than falling through to SPA HTML
+  router.use((_req, res) => {
+    res.status(404).json({ detail: '请求的 API 接口不存在。' });
+  });
+
+  // Ensure middleware errors (e.g. malformed JSON body, payload too large) always return JSON
+  router.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      if (res.headersSent) return;
+      const errObj = err as { status?: number; type?: string; message?: string } | null;
+      if (errObj?.type === 'entity.too.large' || errObj?.status === 413) {
+        res.status(413).json({ detail: '请求数据体积过大，请压缩图片后重试。' });
+        return;
+      }
+      if (errObj?.type === 'entity.parse.failed' || errObj?.status === 400) {
+        res.status(400).json({ detail: '请求体 JSON 格式不合法。' });
+        return;
+      }
+      res.status(500).json({
+        detail: errObj?.message ? `服务端内部异常：${errObj.message}` : '服务端处理请求时发生异常，请稍后重试。',
+      });
+    }
+  );
 
   return router;
 }

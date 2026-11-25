@@ -11,6 +11,7 @@ import {
   type PriceLookupQuery,
 } from './priceLookup';
 import { MultiProtocolVlmProvider, type CustomAiConfig, type VlmProvider } from './vlmProvider';
+import { parseJsonResponse } from '../src/api/client';
 
 // Minimal valid 1x1 PNG bytes
 const TINY_PNG_BUFFER = Buffer.from(
@@ -697,3 +698,105 @@ test('POST /api/v1/market/contribute enforces project_id idempotency and price v
     await srv.close();
   }
 });
+
+test('API router strictly returns JSON for unmatched routes and malformed JSON bodies', async () => {
+  const srv = await startTestServer();
+  try {
+    const notFoundRes = await fetch(`${srv.baseUrl}/api/v1/nonexistent-endpoint`, {
+      method: 'POST',
+    });
+    assert.equal(notFoundRes.status, 404);
+    assert.ok((notFoundRes.headers.get('content-type') || '').includes('application/json'));
+    const notFoundBody = (await notFoundRes.json()) as { detail?: string };
+    assert.ok(notFoundBody.detail && notFoundBody.detail.includes('不存在'));
+
+    const badJsonRes = await fetch(`${srv.baseUrl}/api/v1/auto-price`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Access-Token': 'test-code-001',
+      },
+      body: '{"broken_json": ',
+    });
+    assert.equal(badJsonRes.status, 400);
+    assert.ok((badJsonRes.headers.get('content-type') || '').includes('application/json'));
+    const badJsonBody = (await badJsonRes.json()) as { detail?: string };
+    assert.ok(badJsonBody.detail && badJsonBody.detail.includes('JSON'));
+  } finally {
+    await srv.close();
+  }
+});
+
+test('PriceLookupService enforces maxTotalBudgetMs and gracefully falls back when sources are slow', async () => {
+  const db = new GachaDatabase({
+    filePath: null,
+    defaultInviteCode: 'budget-test',
+    seedMarketStats: true,
+  });
+
+  const slowSource: BasePriceSource = {
+    name: 'slow_mock',
+    isEnabled: () => true,
+    async lookup(_q: PriceLookupQuery) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      return [];
+    },
+  };
+
+  const svc = new PriceLookupService({ sources: [slowSource], timeoutMs: 2500 });
+  const t0 = Date.now();
+  const out = await svc.lookupBatch({
+    db,
+    queries: [
+      { id: 'i1', ipName: '排球少年', label: '孤爪研磨', itemType: '吧唧', vlmWeight: 1.8 },
+      { id: 'i2', ipName: '排球少年', label: '未知角色A', itemType: '吧唧', vlmWeight: 0.7 },
+      { id: 'i3', ipName: '排球少年', label: '未知角色B', itemType: '吧唧', vlmWeight: 0.5 },
+    ],
+    maxTotalBudgetMs: 900,
+    perSourceTimeoutMs: 500,
+    concurrency: 1,
+  });
+  const elapsed = Date.now() - t0;
+
+  assert.ok(elapsed < 1800, `Expected budget circuit-breaker to finish quickly, took ${elapsed}ms`);
+  assert.equal(out.results.length, 3);
+  assert.equal(out.results[0].pricing_tier, 'local_db');
+  assert.equal(out.results[1].pricing_tier, 'vlm_fallback');
+});
+
+test('Frontend parseJsonResponse cleanly converts <!doctype html> responses into actionable errors', async () => {
+  const html200 = new Response('<!doctype html><html lang="zh-CN"><body>App</body></html>', {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+  });
+  await assert.rejects(
+    () => parseJsonResponse(html200, 'AI 识图'),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes("Unexpected token '<'"));
+      assert.ok(err.message.includes('网页内容而非 JSON'));
+      return true;
+    }
+  );
+
+  const html504 = new Response('<!DOCTYPE html><html><body>504 Gateway Timeout</body></html>', {
+    status: 504,
+    headers: { 'Content-Type': 'text/html' },
+  });
+  await assert.rejects(
+    () => parseJsonResponse(html504, 'AI 识图'),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(err.message.includes('504'));
+      return true;
+    }
+  );
+
+  const okJson = new Response(JSON.stringify({ ok: true, value: 42 }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const parsed = await parseJsonResponse<{ ok: boolean; value: number }>(okJson, '测试');
+  assert.equal(parsed.value, 42);
+});
+

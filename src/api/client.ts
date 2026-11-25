@@ -300,7 +300,9 @@ export function mapGroupOrderDetail(raw: RawGroupOrder): GroupOrderDetail {
 }
 
 function buildAiHeaders(inviteCode: string, aiConfig?: AiProviderConfig): Record<string, string> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+  };
   if (inviteCode.trim()) {
     headers['X-Access-Token'] = inviteCode.trim();
   }
@@ -331,28 +333,73 @@ function mapQuota(raw?: RawQuota): QuotaInfo | undefined {
   };
 }
 
-async function parseErrorDetail(res: Response): Promise<string> {
-  try {
-    const data = (await res.json()) as { detail?: string };
-    if (typeof data?.detail === 'string' && data.detail.trim()) {
-      return data.detail;
-    }
-  } catch {
-    // ignore non-json error body
+function isHtmlLikeBody(contentType: string, bodyText: string): boolean {
+  if (contentType.toLowerCase().includes('text/html')) return true;
+  const trimmed = bodyText.trimStart().toLowerCase();
+  return trimmed.startsWith('<!doctype') || trimmed.startsWith('<html') || trimmed.startsWith('<head');
+}
+
+function formatHtmlResponseError(res: Response, endpointLabel: string): string {
+  if (res.redirected) {
+    return `${endpointLabel}失败：预览访问会话可能已过期（请求被重定向至登录/网页），请刷新当前页面后重试。`;
   }
-  if (res.status === 401) return '邀请码无效或已停用，请在设置中检查访问邀请码。';
-  if (res.status === 413) return '图片体积超过 15MB 上限。';
-  if (res.status === 429) return '今日识图次数已用完，请明日再试或填写自有 API Key。';
-  if (res.status === 502) return '上游视觉模型响应异常，请检查 API Key、Base URL 与模型名称。';
-  return `请求失败（HTTP ${res.status}）`;
+  if (res.status === 502 || res.status === 503 || res.status === 504) {
+    return `${endpointLabel}超时或网关暂不可用（HTTP ${res.status}），请稍后重试。`;
+  }
+  if (res.status === 413) {
+    return '上传图片体积超过网关上限，请压缩图片后再试。';
+  }
+  return `${endpointLabel}失败：接口返回了网页内容而非 JSON（后端服务可能正在重启或处于纯静态预览模式），请刷新页面后重试。`;
+}
+
+export async function parseJsonResponse<T>(res: Response, endpointLabel = '请求'): Promise<T> {
+  const contentType = res.headers?.get('content-type') || '';
+  const bodyText = await res.text();
+
+  if (isHtmlLikeBody(contentType, bodyText)) {
+    throw new Error(formatHtmlResponseError(res, endpointLabel));
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = bodyText.trim() ? JSON.parse(bodyText) : null;
+  } catch {
+    if (!res.ok) {
+      throw new Error(formatStatusFallbackError(res.status));
+    }
+    throw new Error(`${endpointLabel}返回了无法解析的非 JSON 数据，请刷新页面或稍后重试。`);
+  }
+
+  if (!res.ok) {
+    const detail =
+      parsed && typeof parsed === 'object' && typeof (parsed as { detail?: unknown }).detail === 'string'
+        ? ((parsed as { detail: string }).detail || '').trim()
+        : '';
+    throw new Error(detail || formatStatusFallbackError(res.status));
+  }
+
+  if (parsed === null || parsed === undefined) {
+    throw new Error(`${endpointLabel}返回为空，请稍后重试。`);
+  }
+
+  return parsed as T;
+}
+
+function formatStatusFallbackError(status: number): string {
+  if (status === 401) return '邀请码无效或已停用，请在设置中检查访问邀请码。';
+  if (status === 413) return '图片体积超过 15MB 上限。';
+  if (status === 429) return '今日识图次数已用完，请明日再试或填写自有 API Key。';
+  if (status === 502) return '上游视觉模型响应异常，请检查 API Key、Base URL 与模型名称。';
+  if (status === 504) return '请求超时（HTTP 504），请稍后重试。';
+  return `请求失败（HTTP ${status}）`;
 }
 
 export async function fetchServerHealth(): Promise<ServerHealthInfo> {
-  const res = await fetch('/api/v1/health');
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-  const raw = (await res.json()) as RawHealthResponse;
+  const res = await fetch('/api/v1/health', {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  });
+  const raw = await parseJsonResponse<RawHealthResponse>(res, '服务状态检查');
   return {
     status: raw.status,
     provider: raw.provider,
@@ -369,6 +416,7 @@ export async function testAiConnectionApi(params: {
 }): Promise<AiTestConnectionResult> {
   const res = await fetch('/api/v1/ai/test', {
     method: 'POST',
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       ...buildAiHeaders(params.inviteCode, params.aiConfig),
@@ -376,11 +424,7 @@ export async function testAiConnectionApi(params: {
     body: JSON.stringify({}),
   });
 
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-
-  const raw = (await res.json()) as RawTestResponse;
+  const raw = await parseJsonResponse<RawTestResponse>(res, 'AI 连通性测试');
   return {
     ok: Boolean(raw.ok),
     providerUsed: raw.provider_used,
@@ -411,16 +455,13 @@ export async function detectGoodsApi(params: {
   try {
     const res = await fetch('/api/v1/detect', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: buildAiHeaders(params.inviteCode, params.aiConfig),
       body: form,
       signal: controller.signal,
     });
 
-    if (!res.ok) {
-      throw new Error(await parseErrorDetail(res));
-    }
-
-    const raw = (await res.json()) as RawDetectResponse;
+    const raw = await parseJsonResponse<RawDetectResponse>(res, 'AI 识图');
     const items: DetectedGoodItem[] = (raw.items || []).map((it) => ({
       label: it.label,
       seriesHint: it.series_hint || raw.series_hint || '',
@@ -464,6 +505,7 @@ export async function autoPriceGoodsApi(params: {
   try {
     const res = await fetch('/api/v1/auto-price', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json',
         ...buildAiHeaders(params.inviteCode, params.aiConfig),
@@ -488,11 +530,7 @@ export async function autoPriceGoodsApi(params: {
       signal: controller.signal,
     });
 
-    if (!res.ok) {
-      throw new Error(await parseErrorDetail(res));
-    }
-
-    const raw = (await res.json()) as RawAutoPriceResponse;
+    const raw = await parseJsonResponse<RawAutoPriceResponse>(res, 'AI 自动调价');
     return {
       ipName: raw.ip_name,
       providerUsed: raw.provider_used,
@@ -541,6 +579,7 @@ export async function lookupMarketPricesApi(params: {
   try {
     const res = await fetch('/api/v1/price-lookup', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json',
         ...buildAiHeaders(params.inviteCode, params.aiConfig),
@@ -564,11 +603,7 @@ export async function lookupMarketPricesApi(params: {
       signal: controller.signal,
     });
 
-    if (!res.ok) {
-      throw new Error(await parseErrorDetail(res));
-    }
-
-    const raw = (await res.json()) as RawPriceLookupResponse;
+    const raw = await parseJsonResponse<RawPriceLookupResponse>(res, '市场比价');
     return {
       ipName: raw.ip_name,
       jpyRate: raw.jpy_rate,
@@ -610,8 +645,10 @@ export async function contributeMarketApi(params: {
 }): Promise<ContributeResponse> {
   const res = await fetch('/api/v1/market/contribute', {
     method: 'POST',
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
+      Accept: 'application/json',
       'X-Access-Token': params.inviteCode.trim(),
     },
     body: JSON.stringify({
@@ -626,10 +663,7 @@ export async function contributeMarketApi(params: {
     }),
   });
 
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-  return (await res.json()) as ContributeResponse;
+  return parseJsonResponse<ContributeResponse>(res, '行情贡献');
 }
 
 export async function fetchMarketStatsApi(params: {
@@ -643,18 +677,18 @@ export async function fetchMarketStatsApi(params: {
 
   const url = `/api/v1/market/stats${qs.toString() ? `?${qs.toString()}` : ''}`;
   const res = await fetch(url, {
-    headers: params.inviteCode.trim()
-      ? {
-          'X-Access-Token': params.inviteCode.trim(),
-        }
-      : {},
+    credentials: 'same-origin',
+    headers: {
+      Accept: 'application/json',
+      ...(params.inviteCode.trim()
+        ? {
+            'X-Access-Token': params.inviteCode.trim(),
+          }
+        : {}),
+    },
   });
 
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-
-  const raw = (await res.json()) as RawMarketStatsResponse;
+  const raw = await parseJsonResponse<RawMarketStatsResponse>(res, '行情库查询');
   return {
     stats: (raw.stats || []).map((s) => ({
       id: s.id,
@@ -684,7 +718,11 @@ export async function createGroupOrderApi(params: {
 }> {
   const res = await fetch('/api/v1/groups', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
     body: JSON.stringify({
       title: params.title,
       ip_name: params.ipName,
@@ -701,16 +739,12 @@ export async function createGroupOrderApi(params: {
     }),
   });
 
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-
-  const raw = (await res.json()) as {
+  const raw = await parseJsonResponse<{
     share_code: string;
     share_url: string;
     owner_token: string;
     order: RawGroupOrder;
-  };
+  }>(res, '发布在线拼团');
 
   return {
     shareCode: raw.share_code,
@@ -724,15 +758,15 @@ export async function fetchGroupOrderApi(params: {
   shareCode: string;
   ownerToken?: string;
 }): Promise<{ isOwner: boolean; order: GroupOrderDetail }> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { Accept: 'application/json' };
   if (params.ownerToken) {
     headers.Authorization = `Bearer ${params.ownerToken}`;
   }
-  const res = await fetch(`/api/v1/groups/${encodeURIComponent(params.shareCode)}`, { headers });
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-  const raw = (await res.json()) as { is_owner: boolean; order: RawGroupOrder };
+  const res = await fetch(`/api/v1/groups/${encodeURIComponent(params.shareCode)}`, {
+    credentials: 'same-origin',
+    headers,
+  });
+  const raw = await parseJsonResponse<{ is_owner: boolean; order: RawGroupOrder }>(res, '查询在线拼团');
   return {
     isOwner: Boolean(raw.is_owner),
     order: mapGroupOrderDetail(raw.order),
@@ -748,15 +782,14 @@ export async function cancelGroupClaimApi(params: {
     `/api/v1/groups/${encodeURIComponent(params.shareCode)}/claims/${encodeURIComponent(params.claimId)}`,
     {
       method: 'DELETE',
+      credentials: 'same-origin',
       headers: {
+        Accept: 'application/json',
         Authorization: `Bearer ${params.ownerToken}`,
       },
     }
   );
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-  const raw = (await res.json()) as { order: RawGroupOrder };
+  const raw = await parseJsonResponse<{ order: RawGroupOrder }>(res, '撤销排谷记录');
   return mapGroupOrderDetail(raw.order);
 }
 
@@ -769,8 +802,10 @@ export async function syncGroupOrderApi(params: {
 }): Promise<GroupOrderDetail> {
   const res = await fetch(`/api/v1/groups/${encodeURIComponent(params.shareCode)}/sync`, {
     method: 'PATCH',
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
+      Accept: 'application/json',
       Authorization: `Bearer ${params.ownerToken}`,
     },
     body: JSON.stringify({
@@ -786,9 +821,6 @@ export async function syncGroupOrderApi(params: {
       })),
     }),
   });
-  if (!res.ok) {
-    throw new Error(await parseErrorDetail(res));
-  }
-  const raw = (await res.json()) as { order: RawGroupOrder };
+  const raw = await parseJsonResponse<{ order: RawGroupOrder }>(res, '同步在线拼团');
   return mapGroupOrderDetail(raw.order);
 }

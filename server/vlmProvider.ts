@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import {
   buildAutoPricePrompt,
   buildVlmDetectPrompt,
@@ -297,17 +297,75 @@ export class MultiProtocolVlmProvider implements VlmProvider {
       }
       parts.push({ text: params.promptText });
 
-      const response = await ai.models.generateContent({
-        model: this.modelName,
-        contents: { parts },
-        config: params.jsonMode ? { responseMimeType: 'application/json' } : undefined,
-      });
+      const fallbackModel = 'gemini-3.1-flash-lite';
+      const candidateModels =
+        this.modelName === fallbackModel ? [this.modelName] : [this.modelName, fallbackModel];
 
-      const text = response.text;
-      if (!text || !text.trim()) {
-        throw new Error('默认视觉模型返回内容为空，请重试。');
+      const isTransientUnavailable = (msg: string): boolean =>
+        /503|UNAVAILABLE|high demand|overloaded|temporarily unavailable|ECONNRESET|ETIMEDOUT/i.test(msg);
+
+      let lastErr: unknown = null;
+
+      for (const targetModel of candidateModels) {
+        const maxAttempts = targetModel === this.modelName ? 2 : 2;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            const response = await ai.models.generateContent({
+              model: targetModel,
+              contents: { parts },
+              config: {
+                ...(params.jsonMode ? { responseMimeType: 'application/json' } : {}),
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              },
+            });
+
+            const text = response.text;
+            if (!text || !text.trim()) {
+              throw new Error('默认视觉模型返回内容为空，请重试。');
+            }
+            return { rawText: text, providerUsed: `gemini:${targetModel}` };
+          } catch (err) {
+            lastErr = err;
+            const rawMsg = err instanceof Error ? err.message : String(err);
+            if (isTransientUnavailable(rawMsg)) {
+              if (attempt < maxAttempts) {
+                const delayMs = 600 * attempt + Math.floor(Math.random() * 250);
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+                continue;
+              }
+              // Move on to next fallback Gemini model
+              break;
+            }
+            // Non-transient error (e.g., 400/403/404/429): stop immediately
+            break;
+          }
+        }
+        // If the failure was non-transient, don't try fallback model
+        const lastMsg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? '');
+        if (!isTransientUnavailable(lastMsg)) {
+          break;
+        }
       }
-      return { rawText: text, providerUsed: `gemini:${this.modelName}` };
+
+      const rawMsg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? '未知错误');
+      if (/<!doctype|<html|Unexpected token ['"]<['"]/i.test(rawMsg)) {
+        throw new Error('上游 Gemini 网关暂时返回了非 JSON 异常页面，请稍后重试。');
+      }
+      if (/503|UNAVAILABLE|high demand|overloaded/i.test(rawMsg)) {
+        throw new Error(
+          '内置 Gemini 模型当前处于高并发拥堵状态（503），请稍等几秒后重试，或在「设置 → AI 模型与密钥」中切换自有 API Key。'
+        );
+      }
+      if (/PERMISSION_DENIED|API_KEY_INVALID|403/i.test(rawMsg)) {
+        throw new Error('内置 Gemini API Key 无效或无权访问，请在 Settings > Secrets 中检查配置。');
+      }
+      if (/RESOURCE_EXHAUSTED|429/i.test(rawMsg)) {
+        throw new Error('内置 Gemini 服务配额已达上限（429），请稍后重试或在 Settings > Secrets 中切换可用密钥。');
+      }
+      if (/NOT_FOUND|404/i.test(rawMsg)) {
+        throw new Error(`默认视觉模型 ${this.modelName} 不可用（404），请检查模型配置。`);
+      }
+      throw lastErr instanceof Error ? lastErr : new Error(rawMsg);
     }
 
     // Custom BYOK protocols require a user API key
