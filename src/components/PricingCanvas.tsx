@@ -4,7 +4,9 @@ import {
   CheckCircle2,
   ClipboardPaste,
   Database,
+  ExternalLink,
   Lock,
+  RefreshCw,
   Scissors,
   Trash2,
   Unlock,
@@ -20,6 +22,7 @@ import {
   triggerBlobDownload,
 } from '../core/canvasExport';
 import { PIN_TAGS, type GoodItem, type PinTag } from '../types/pricing';
+import { sanitizeSafeHref } from '../api/client';
 
 export const PricingCanvas: React.FC = () => {
   const initialized = usePricerStore((s) => s.initialized);
@@ -37,12 +40,15 @@ export const PricingCanvas: React.FC = () => {
   const updateItemField = usePricerStore((s) => s.updateItemField);
   const deleteItem = usePricerStore((s) => s.deleteItem);
   const loadImageIntoActiveProject = usePricerStore((s) => s.loadImageIntoActiveProject);
+  const lookupItemIds = usePricerStore((s) => s.lookupItemIds);
+  const runSingleItemPriceLookup = usePricerStore((s) => s.runSingleItemPriceLookup);
   const exportConfig = usePricerStore((s) => s.settings.exportConfig);
   const notify = usePricerStore((s) => s.notify);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [showPopoverSources, setShowPopoverSources] = useState(false);
   const [draggingPin, setDraggingPin] = useState<{
     id: string;
     startClientX: number;
@@ -54,6 +60,10 @@ export const PricingCanvas: React.FC = () => {
   const avgPrice = calcEffectiveAvgPrice(items);
   const selectedItem: GoodItem | null = items.find((it) => it.id === selectedItemId) ?? null;
   const validQty = items.reduce((sum, it) => sum + (it.quantity > 0 ? it.quantity : 0), 0);
+
+  useEffect(() => {
+    setShowPopoverSources(false);
+  }, [selectedItemId]);
 
   // Pointer drag handling for moving capsules without modifying box
   useEffect(() => {
@@ -132,6 +142,8 @@ export const PricingCanvas: React.FC = () => {
     }
   };
 
+  const isSelectedLookingUp = selectedItem ? lookupItemIds.includes(selectedItem.id) : false;
+
   return (
     <main
       className="flex-1 min-w-0 flex flex-col studio-dot-grid relative overflow-hidden"
@@ -166,7 +178,7 @@ export const PricingCanvas: React.FC = () => {
             <span className="truncate">
               {canvasMode === 'add_pin'
                 ? '加点模式：点击图中任意谷子位置即可新增价格胶囊'
-                : '提示：拖拽胶囊可防挡脸，点击胶囊可快捷调价并自动锁定平账'}
+                : '提示：拖拽胶囊可防挡脸，点击胶囊查看二手参考市价并快捷锁价平账'}
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -174,7 +186,7 @@ export const PricingCanvas: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setCanvasMode('select')}
-                className="px-2.5 py-1 rounded-md text-xs font-medium bg-slate-900 text-white hover:bg-slate-800 transition-colors whitespace-nowrap"
+                className="px-2.5 py-1 rounded-md text-xs font-medium bg-slate-900 text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
               >
                 完成加点
               </button>
@@ -182,7 +194,7 @@ export const PricingCanvas: React.FC = () => {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:text-slate-950 hover:border-slate-300 transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:text-slate-950 hover:border-slate-300 transition-colors whitespace-nowrap shrink-0"
             >
               <Upload className="w-3.5 h-3.5" />
               <span>更换原图</span>
@@ -206,13 +218,13 @@ export const PricingCanvas: React.FC = () => {
             </div>
             <h1 className="text-lg font-bold text-slate-950">粘贴截图或拖入谷子平铺图</h1>
             <p className="mt-2 text-sm text-slate-500 leading-relaxed">
-              直接从 QQ / 微信截图后按 <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 font-mono text-xs text-slate-700">Ctrl+V</kbd> 粘贴，即可使用 AI 识图或网格打点自动平账。
+              直接从 QQ / 微信截图后按 <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 font-mono text-xs text-slate-700">Ctrl+V</kbd> 粘贴，即可使用 AI 识图、闲鱼/煤炉自动比价与总价平账。
             </p>
             <div className="mt-6 flex items-center justify-center gap-3">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white bg-slate-950 hover:bg-slate-800 transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white bg-slate-950 hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
               >
                 <Upload className="w-4 h-4" />
                 <span>选择本地图片</span>
@@ -296,9 +308,13 @@ export const PricingCanvas: React.FC = () => {
                         {item.tag}
                       </span>
                     )}
-                    {item.weightSource === 'market_db' && (
+                    {(item.weightSource === 'market_lookup' || item.weightSource === 'market_db') && (
                       <span
-                        title="热度来自历史成团行情库"
+                        title={
+                          item.marketPrice?.marketPriceMedian
+                            ? `闲鱼/煤炉参考中位价 ¥${formatMoney(item.marketPrice.marketPriceMedian)}`
+                            : '热度来自历史成团行情库'
+                        }
                         className="inline-flex items-center opacity-85"
                       >
                         <Database className="w-2.5 h-2.5" />
@@ -308,24 +324,24 @@ export const PricingCanvas: React.FC = () => {
                 );
               })}
 
-              {/* Anchored Quick-Price Popover */}
+              {/* Anchored Quick-Price & Market Traceability Popover */}
               {selectedItem && (
                 <div
                   role="dialog"
                   aria-label={`${selectedItem.label} 快捷调价`}
                   onClick={(e) => e.stopPropagation()}
                   style={{
-                    left: `${Math.min(76, Math.max(24, selectedItem.x * 100))}%`,
+                    left: `${Math.min(75, Math.max(25, selectedItem.x * 100))}%`,
                     top:
-                      selectedItem.y > 0.55
+                      selectedItem.y > 0.52
                         ? `calc(${selectedItem.y * 100}% - 28px)`
                         : `calc(${selectedItem.y * 100}% + 26px)`,
                   }}
                   className={`absolute -translate-x-1/2 ${
-                    selectedItem.y > 0.55 ? '-translate-y-full' : ''
-                  } w-[272px] bg-white rounded-xl border border-slate-200 shadow-xl p-3.5 z-40 text-left`}
+                    selectedItem.y > 0.52 ? '-translate-y-full' : ''
+                  } w-[296px] bg-white rounded-xl border border-slate-200 shadow-xl p-3.5 z-40 text-left`}
                 >
-                  <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                  <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
                     <input
                       type="text"
                       aria-label="编辑角色名称"
@@ -343,11 +359,110 @@ export const PricingCanvas: React.FC = () => {
                     </button>
                   </div>
 
+                  {/* V2.0 Market Reference Summary & Re-lookup */}
+                  <div className="mt-2.5 pb-2.5 border-b border-slate-100 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <div className="text-slate-600 tabular-nums min-w-0 truncate">
+                        {selectedItem.marketPrice?.marketPriceMedian !== null &&
+                        selectedItem.marketPrice?.marketPriceMedian !== undefined ? (
+                          <>
+                            <span className="font-semibold text-emerald-700">
+                              闲鱼/煤炉均价 ¥{formatMoney(selectedItem.marketPrice.marketPriceMedian)}
+                            </span>
+                            <span className="text-slate-400">
+                              {' '}
+                              · 样本 {selectedItem.marketPrice.sampleCount} 条
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-slate-500">暂无近期二手市价样本</span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isSelectedLookingUp}
+                        onClick={() =>
+                          void runSingleItemPriceLookup(selectedItem.id, {
+                            seriesHint: selectedItem.seriesHint,
+                            jpKeywords: selectedItem.jpKeywords,
+                            forceRefresh: true,
+                          })
+                        }
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-800 hover:text-slate-950 whitespace-nowrap shrink-0"
+                      >
+                        <RefreshCw
+                          className={`w-3 h-3 ${isSelectedLookingUp ? 'animate-spin' : ''}`}
+                        />
+                        <span>{isSelectedLookingUp ? '比价中' : '重新比价'}</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        aria-label="微调系列或柄图关键词"
+                        placeholder="补充系列特征（如：原画展吧唧）"
+                        value={selectedItem.seriesHint ?? ''}
+                        onChange={(e) =>
+                          updateItemField(selectedItem.id, { seriesHint: e.target.value })
+                        }
+                        className="flex-1 px-2 py-1 rounded border border-slate-200 text-[11px] text-slate-800 focus:outline-none focus:border-slate-900"
+                      />
+                      {selectedItem.marketPrice && selectedItem.marketPrice.sources.length > 0 && (
+                        <button
+                          type="button"
+                          aria-expanded={showPopoverSources}
+                          onClick={() => setShowPopoverSources((v) => !v)}
+                          className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-[11px] font-medium text-slate-700 whitespace-nowrap shrink-0"
+                        >
+                          {showPopoverSources ? '收起来源' : '查看来源'}
+                        </button>
+                      )}
+                    </div>
+
+                    {showPopoverSources && selectedItem.marketPrice && (
+                      <div className="pt-1 space-y-1 max-h-28 overflow-y-auto">
+                        {selectedItem.marketPrice.sources.map((src, idx) => {
+                          const safeHref = sanitizeSafeHref(src.url);
+                          return (
+                            <div
+                              key={`${src.platform}-${idx}`}
+                              className="flex items-center justify-between gap-2 text-[11px] text-slate-600"
+                            >
+                              <div className="min-w-0 truncate">
+                                <span className="font-medium text-slate-800">{src.platform}</span>
+                                <span className="mx-1 text-slate-300">·</span>
+                                {safeHref ? (
+                                  <a
+                                    href={safeHref}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="hover:text-slate-950 hover:underline inline-flex items-center gap-0.5"
+                                  >
+                                    <span className="truncate max-w-[130px]">{src.title}</span>
+                                    <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                  </a>
+                                ) : (
+                                  <span>{src.title}</span>
+                                )}
+                              </div>
+                              <span className="font-mono tabular-nums text-slate-900 shrink-0">
+                                ¥{formatMoney(src.cnyPrice)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
                   {/* Quick Step Price Buttons (Auto-Lock!) */}
-                  <div className="mt-3">
+                  <div className="mt-2.5">
                     <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1.5">
                       <span>单价（修改即自动锁定）</span>
-                      <span className="font-mono">权重 {selectedItem.weight.toFixed(2)}</span>
+                      <span className="font-mono tabular-nums">
+                        权重 {selectedItem.weight.toFixed(2)}
+                      </span>
                     </div>
                     <div className="flex items-center gap-1">
                       <button
@@ -401,8 +516,8 @@ export const PricingCanvas: React.FC = () => {
                   </div>
 
                   {/* Tags selector */}
-                  <div className="mt-3">
-                    <div className="text-[11px] text-slate-500 mb-1.5">拼团标记</div>
+                  <div className="mt-2.5">
+                    <div className="text-[11px] text-slate-500 mb-1">拼团标记</div>
                     <div className="grid grid-cols-6 gap-1">
                       {PIN_TAGS.map((tag: PinTag) => {
                         const active = selectedItem.tag === tag;
@@ -411,7 +526,7 @@ export const PricingCanvas: React.FC = () => {
                             key={tag || 'none'}
                             type="button"
                             onClick={() => updateItemField(selectedItem.id, { tag })}
-                            className={`py-1 rounded text-[11px] font-medium transition-colors ${
+                            className={`py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap ${
                               active
                                 ? 'bg-slate-900 text-white'
                                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -429,7 +544,7 @@ export const PricingCanvas: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => toggleItemLock(selectedItem.id)}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                         selectedItem.locked
                           ? 'bg-amber-50 text-amber-800 hover:bg-amber-100'
                           : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
@@ -451,7 +566,7 @@ export const PricingCanvas: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => void handleCropSingleItem(selectedItem)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors whitespace-nowrap shrink-0"
                     >
                       <Scissors className="w-3 h-3" />
                       <span>裁切查价</span>

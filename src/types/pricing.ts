@@ -99,7 +99,7 @@ export interface GachaProjectMeta {
   /** V2.0 若已发布为在线拼团，保存关联信息 */
   publishedGroup?: {
     shareCode: string;
-    ownerToken: string;
+    ownerToken?: string;
     publishedAt: string;
   };
 }

@@ -6,6 +6,7 @@ import {
   Loader2,
   PlusCircle,
   Sparkles,
+  Users,
   Wand2,
   X,
 } from 'lucide-react';
@@ -16,6 +17,7 @@ import { PricingCanvas } from './components/PricingCanvas';
 import { InspectorPanel } from './components/InspectorPanel';
 import { GridPinModal } from './components/GridPinModal';
 import { SecondarySettlementModal } from './components/SecondarySettlementModal';
+import { GroupBuyModal } from './components/GroupBuyModal';
 import { ExportModal } from './components/ExportModal';
 import { SettingsMarketModal, type SettingsModalTab } from './components/SettingsMarketModal';
 
@@ -42,6 +44,7 @@ export default function App() {
   const [mobilePane, setMobilePane] = useState<'canvas' | 'inspector'>('canvas');
   const [gridModalOpen, setGridModalOpen] = useState(false);
   const [settlementModalOpen, setSettlementModalOpen] = useState(false);
+  const [groupBuyModalOpen, setGroupBuyModalOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [settingsModal, setSettingsModal] = useState<{
     open: boolean;
@@ -125,6 +128,7 @@ export default function App() {
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onOpenGridModal={() => setGridModalOpen(true)}
         onOpenSettlementModal={() => setSettlementModalOpen(true)}
+        onOpenGroupBuyModal={() => setGroupBuyModalOpen(true)}
         onOpenExportModal={() => setExportModalOpen(true)}
         onOpenSettingsModal={(tab = 'ai') => setSettingsModal({ open: true, tab })}
       />
@@ -181,6 +185,15 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setGroupBuyModalOpen(true)}
+            disabled={!activeProject || activeProject.items.length === 0}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 whitespace-nowrap shrink-0 disabled:opacity-40"
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>拼谷</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setSettingsModal({ open: true, tab: 'market' })}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 whitespace-nowrap shrink-0"
           >
@@ -232,6 +245,10 @@ export default function App() {
       <SecondarySettlementModal
         open={settlementModalOpen}
         onClose={() => setSettlementModalOpen(false)}
+      />
+      <GroupBuyModal
+        open={groupBuyModalOpen}
+        onClose={() => setGroupBuyModalOpen(false)}
       />
       <ExportModal open={exportModalOpen} onClose={() => setExportModalOpen(false)} />
       <SettingsMarketModal

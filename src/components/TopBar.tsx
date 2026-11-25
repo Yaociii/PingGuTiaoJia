@@ -11,6 +11,7 @@ import {
   Redo2,
   Sparkles,
   Undo2,
+  Users,
   Wand2,
 } from 'lucide-react';
 import { usePricerStore } from '../store/usePricerStore';
@@ -21,6 +22,7 @@ interface TopBarProps {
   onToggleSidebar: () => void;
   onOpenGridModal: () => void;
   onOpenSettlementModal: () => void;
+  onOpenGroupBuyModal: () => void;
   onOpenExportModal: () => void;
   onOpenSettingsModal: (defaultTab?: SettingsModalTab) => void;
 }
@@ -30,6 +32,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleSidebar,
   onOpenGridModal,
   onOpenSettlementModal,
+  onOpenGroupBuyModal,
   onOpenExportModal,
   onOpenSettingsModal,
 }) => {
@@ -46,6 +49,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const redo = usePricerStore((s) => s.redo);
 
   const hasImage = Boolean(activeProject?.imageDataUrl);
+  const hasItems = Boolean(activeProject && activeProject.items.length > 0);
   const canAutoPrice = Boolean(activeProject && activeProject.items.length >= 2);
 
   return (
@@ -97,7 +101,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           type="button"
           onClick={() => void runAiAutoPrice()}
           disabled={!canAutoPrice || isAutoPricing}
-          title="结合角色热度与历史行情自动分配权重并平账（已锁定单品保持原价）"
+          title="结合真实市价与历史行情自动分配权重并平账（已锁定单品保持原价）"
           className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-45 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
         >
           {isAutoPricing ? (
@@ -142,11 +146,21 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           type="button"
           onClick={onOpenSettlementModal}
-          disabled={!activeProject || activeProject.items.length === 0}
+          disabled={!hasItems}
           className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 disabled:opacity-40 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
         >
           <Calculator className="w-3.5 h-3.5" />
           <span>盲抽二调</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenGroupBuyModal}
+          disabled={!hasItems}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:text-slate-950 hover:bg-slate-100 disabled:opacity-40 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
+        >
+          <Users className="w-3.5 h-3.5" />
+          <span>多人拼谷</span>
         </button>
 
         <button
@@ -187,7 +201,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           type="button"
           onClick={onOpenExportModal}
-          disabled={!hasImage}
+          disabled={!hasItems && !hasImage}
           className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-slate-950 hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors whitespace-nowrap shrink-0"
         >
           <Download className="w-3.5 h-3.5" />

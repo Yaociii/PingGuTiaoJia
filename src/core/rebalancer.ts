@@ -353,6 +353,39 @@ export function rebalanceItems(
       bestSlot.units += bestDeltaDir;
       diffSteps -= bestDeltaDir * bestSlot.quantity;
     }
+
+    // 二元混合数量配平消差（例如 qty=4 减 1 步、qty=3 加 1 步，净消去 -1 步）
+    const maxPairPasses = Math.min(32, Math.abs(diffSteps) + 8);
+    for (let p = 0; p < maxPairPasses && diffSteps !== 0; p++) {
+      let bestInc: InternalSlot | null = null;
+      let bestDec: InternalSlot | null = null;
+      let bestAbs = Math.abs(diffSteps);
+      let bestScore = -Infinity;
+
+      for (const inc of slots) {
+        if (inc.units >= inc.maxUnits) continue;
+        for (const dec of slots) {
+          if (dec === inc || dec.units <= dec.minUnits) continue;
+          const netQty = inc.quantity - dec.quantity;
+          if (netQty === 0) continue;
+          const newAbs = Math.abs(diffSteps - netQty);
+          if (newAbs < bestAbs || (newAbs === bestAbs && newAbs < Math.abs(diffSteps))) {
+            const score = (inc.remainder - dec.remainder) * 10 + (inc.weight - dec.weight) * 0.5;
+            if (newAbs < bestAbs || score > bestScore) {
+              bestAbs = newAbs;
+              bestInc = inc;
+              bestDec = dec;
+              bestScore = score;
+            }
+          }
+        }
+      }
+
+      if (!bestInc || !bestDec) break;
+      bestInc.units += 1;
+      bestDec.units -= 1;
+      diffSteps -= bestInc.quantity - bestDec.quantity;
+    }
   }
 
   for (const s of slots) {

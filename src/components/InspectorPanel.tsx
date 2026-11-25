@@ -2,19 +2,28 @@ import React, { useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  ExternalLink,
+  Loader2,
   Lock,
+  RefreshCw,
   RotateCcw,
   Scissors,
+  Search,
   Trash2,
   Unlock,
 } from 'lucide-react';
 import { usePricerStore } from '../store/usePricerStore';
 import { calcTargetTotal, formatMoney } from '../core/rebalancer';
 import {
+  GAMMA_MAX,
+  GAMMA_MIN,
   MERCH_CATEGORIES,
   PIN_TAGS,
+  WEIGHT_MAX,
+  WEIGHT_MIN,
   type MerchCategory,
   type PinTag,
+  type PriceFreshness,
   type PriceStep,
 } from '../types/pricing';
 import {
@@ -22,6 +31,13 @@ import {
   cropSingleItemToBlob,
   triggerBlobDownload,
 } from '../core/canvasExport';
+import { sanitizeSafeHref } from '../api/client';
+
+function formatFreshnessText(f?: PriceFreshness): string {
+  if (f === 'fresh') return '30天内';
+  if (f === 'recent') return '90天内';
+  return '待更新';
+}
 
 export const InspectorPanel: React.FC = () => {
   const activeProject = usePricerStore((s) => s.activeProject);
@@ -37,6 +53,10 @@ export const InspectorPanel: React.FC = () => {
   const deleteItem = usePricerStore((s) => s.deleteItem);
   const unlockAllItems = usePricerStore((s) => s.unlockAllItems);
   const resetEqualWeights = usePricerStore((s) => s.resetEqualWeights);
+  const isLookingUpPrices = usePricerStore((s) => s.isLookingUpPrices);
+  const lookupItemIds = usePricerStore((s) => s.lookupItemIds);
+  const runBatchPriceLookup = usePricerStore((s) => s.runBatchPriceLookup);
+  const runSingleItemPriceLookup = usePricerStore((s) => s.runSingleItemPriceLookup);
   const notify = usePricerStore((s) => s.notify);
 
   const initialized = usePricerStore((s) => s.initialized);
@@ -44,7 +64,7 @@ export const InspectorPanel: React.FC = () => {
 
   if (!initialized) {
     return (
-      <aside className="w-full md:w-[348px] shrink-0 bg-white border-l border-[#E4E7EC] p-5 space-y-4">
+      <aside className="w-full md:w-[356px] shrink-0 bg-white border-l border-[#E4E7EC] p-5 space-y-4">
         <div className="h-8 rounded-lg bg-slate-100 animate-pulse" />
         <div className="h-10 rounded-lg bg-slate-100 animate-pulse" />
         <div className="h-px bg-slate-100" />
@@ -59,13 +79,14 @@ export const InspectorPanel: React.FC = () => {
 
   if (!activeProject) {
     return (
-      <aside className="w-full md:w-[348px] shrink-0 bg-white border-l border-[#E4E7EC] p-6 text-sm text-slate-400">
+      <aside className="w-full md:w-[356px] shrink-0 bg-white border-l border-[#E4E7EC] p-6 text-sm text-slate-400">
         暂无打开的拼团工程。
       </aside>
     );
   }
 
   const { cost } = activeProject;
+  const gamma = cost.gamma ?? 1.0;
   const items = rebalance.items;
   const lockedCount = items.filter((it) => it.locked && it.quantity > 0).length;
   const computedTarget = calcTargetTotal(cost);
@@ -90,10 +111,10 @@ export const InspectorPanel: React.FC = () => {
   return (
     <aside
       aria-label="成本核算与调价明细"
-      className="w-full md:w-[348px] shrink-0 bg-white border-l border-[#E4E7EC] flex flex-col h-full"
+      className="w-full md:w-[356px] shrink-0 bg-white border-l border-[#E4E7EC] flex flex-col h-full"
     >
-      {/* Section 1: Project Meta & Cost Calculator */}
-      <div className="p-4 border-b border-[#EEF0F4] space-y-3.5 shrink-0">
+      {/* Section 1: Project Meta, Cost Calculator & Gamma Slider */}
+      <div className="p-4 border-b border-[#EEF0F4] space-y-3 shrink-0">
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label htmlFor="ip-name-input" className="block text-[11px] font-medium text-slate-500 mb-1">
@@ -135,7 +156,7 @@ export const InspectorPanel: React.FC = () => {
               <button
                 type="button"
                 onClick={() => updateCostConfig({ mode: 'direct' })}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 ${
                   cost.mode === 'direct'
                     ? 'bg-white text-slate-950 shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
@@ -146,7 +167,7 @@ export const InspectorPanel: React.FC = () => {
               <button
                 type="button"
                 onClick={() => updateCostConfig({ mode: 'foreign' })}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 ${
                   cost.mode === 'foreign'
                     ? 'bg-white text-slate-950 shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
@@ -176,7 +197,7 @@ export const InspectorPanel: React.FC = () => {
                     const val = Number.parseFloat(e.target.value);
                     updateCostConfig({ targetTotal: Number.isFinite(val) ? Math.max(0, val) : 0 });
                   }}
-                  className="w-full pl-7 pr-3 py-2 rounded-lg border border-slate-200 text-base font-mono font-bold text-slate-950 tabular-nums focus:outline-none focus:border-slate-900"
+                  className="w-full pl-7 pr-3 py-1.5 rounded-lg border border-slate-200 text-base font-mono font-bold text-slate-950 tabular-nums focus:outline-none focus:border-slate-900"
                 />
               </div>
               <div className="flex items-center bg-slate-100 p-0.5 rounded-lg shrink-0" role="group" aria-label="调价步长">
@@ -185,7 +206,7 @@ export const InspectorPanel: React.FC = () => {
                     key={s}
                     type="button"
                     onClick={() => updateCostConfig({ step: s })}
-                    className={`px-2 py-1.5 rounded-md text-xs font-mono font-semibold transition-colors ${
+                    className={`px-2 py-1 rounded-md text-xs font-mono font-semibold transition-colors whitespace-nowrap shrink-0 ${
                       cost.step === s
                         ? 'bg-white text-slate-950 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
@@ -276,7 +297,7 @@ export const InspectorPanel: React.FC = () => {
                       key={s}
                       type="button"
                       onClick={() => updateCostConfig({ step: s })}
-                      className={`px-2 py-1 rounded text-[11px] font-mono font-semibold transition-colors ${
+                      className={`px-2 py-1 rounded text-[11px] font-mono font-semibold transition-colors whitespace-nowrap shrink-0 ${
                         cost.step === s
                           ? 'bg-white text-slate-950 shadow-xs'
                           : 'text-slate-600 hover:text-slate-900'
@@ -290,40 +311,97 @@ export const InspectorPanel: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* V2.0 Price Spread Gamma Slider */}
+        <div className="pt-2 border-t border-slate-100">
+          <div className="flex items-center justify-between text-[11px] mb-1">
+            <label htmlFor="gamma-slider" className="font-medium text-slate-600">
+              冷烫温差系数 γ
+            </label>
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                {gamma.toFixed(2)}
+              </span>
+              {Math.abs(gamma - 1.0) > 0.01 && (
+                <button
+                  type="button"
+                  onClick={() => updateCostConfig({ gamma: 1.0 })}
+                  className="text-[10px] font-medium text-slate-500 hover:text-slate-900 underline whitespace-nowrap shrink-0"
+                >
+                  重置1.0
+                </button>
+              )}
+            </div>
+          </div>
+          <input
+            id="gamma-slider"
+            type="range"
+            min={GAMMA_MIN}
+            max={GAMMA_MAX}
+            step={0.05}
+            value={gamma}
+            onChange={(e) => {
+              const val = Number.parseFloat(e.target.value);
+              if (Number.isFinite(val)) {
+                updateCostConfig({ gamma: val });
+              }
+            }}
+            className="w-full h-1.5 accent-slate-900 cursor-pointer"
+          />
+          <div className="flex justify-between text-[10px] text-slate-400 font-mono tabular-nums mt-0.5">
+            <span>0.5 缓和均摊</span>
+            <span>1.0 标准</span>
+            <span>2.5 强拉冷烫</span>
+          </div>
+        </div>
       </div>
 
-      {/* Section 2 Header: Goods List Toolbar */}
-      <div className="px-4 py-2.5 border-b border-[#EEF0F4] flex items-center justify-between gap-2 shrink-0 bg-slate-50/60">
+      {/* Section 2 Header: Goods List Toolbar + Batch Market Price Lookup */}
+      <div className="px-4 py-2 border-b border-[#EEF0F4] flex items-center justify-between gap-2 shrink-0 bg-slate-50/60">
         <div className="text-xs text-slate-600 tabular-nums whitespace-nowrap">
           <span className="font-semibold text-slate-900">单品明细</span>
-          <span className="mx-1.5 text-slate-300" aria-hidden="true">
+          <span className="mx-1 text-slate-300" aria-hidden="true">
             ·
           </span>
           <span>{items.length} 项</span>
           {lockedCount > 0 && (
             <>
-              <span className="mx-1.5 text-slate-300" aria-hidden="true">
+              <span className="mx-1 text-slate-300" aria-hidden="true">
                 ·
               </span>
               <span className="text-amber-700 font-medium">已锁 {lockedCount}</span>
             </>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => void runBatchPriceLookup(false)}
+            disabled={items.length === 0 || isLookingUpPrices}
+            title="并发检索闲鱼/煤炉近期单出市价并按真实市价比例重算未锁定项"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
+          >
+            {isLookingUpPrices ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Search className="w-3 h-3" />
+            )}
+            <span>{isLookingUpPrices ? '比价中' : '全团比价'}</span>
+          </button>
           <button
             type="button"
             onClick={unlockAllItems}
             disabled={lockedCount === 0}
-            className="px-2 py-1 rounded text-[11px] font-medium text-slate-600 hover:text-slate-950 hover:bg-slate-200/70 disabled:opacity-35 transition-colors whitespace-nowrap"
+            className="px-1.5 py-1 rounded text-[11px] font-medium text-slate-600 hover:text-slate-950 hover:bg-slate-200/70 disabled:opacity-35 transition-colors whitespace-nowrap shrink-0"
           >
-            全部解锁
+            全解锁
           </button>
           <button
             type="button"
             onClick={resetEqualWeights}
             disabled={items.length === 0}
             title="重置全部为均价权重"
-            className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-slate-600 hover:text-slate-950 hover:bg-slate-200/70 disabled:opacity-35 transition-colors whitespace-nowrap"
+            className="inline-flex items-center gap-0.5 px-1.5 py-1 rounded text-[11px] font-medium text-slate-600 hover:text-slate-950 hover:bg-slate-200/70 disabled:opacity-35 transition-colors whitespace-nowrap shrink-0"
           >
             <RotateCcw className="w-3 h-3" />
             <span>均分</span>
@@ -343,6 +421,8 @@ export const InspectorPanel: React.FC = () => {
           items.map((item) => {
             const isSelected = item.id === selectedItemId;
             const isExpanded = expandedId === item.id;
+            const isItemLookingUp = lookupItemIds.includes(item.id);
+            const mp = item.marketPrice;
 
             return (
               <div
@@ -356,7 +436,7 @@ export const InspectorPanel: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setExpandedId(isExpanded ? null : item.id)}
-                    aria-label={`展开 ${item.label} 高级设置`}
+                    aria-label={`展开 ${item.label} 详情与比价来源`}
                     aria-expanded={isExpanded}
                     className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 shrink-0"
                   >
@@ -381,7 +461,7 @@ export const InspectorPanel: React.FC = () => {
                     {item.locked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
                   </button>
 
-                  {/* Name & single-line unboxed metadata */}
+                  {/* Name & clean unboxed metadata line */}
                   <div
                     className="min-w-0 flex-1 cursor-pointer"
                     onClick={() => setSelectedItemId(item.id)}
@@ -395,6 +475,11 @@ export const InspectorPanel: React.FC = () => {
                         onClick={(e) => e.stopPropagation()}
                         className="min-w-0 flex-1 text-xs font-semibold text-slate-900 bg-transparent focus:bg-white focus:ring-1 focus:ring-slate-300 rounded px-1 -mx-1 py-0.5 focus:outline-none truncate"
                       />
+                      {item.tag && item.quantity > 0 && (
+                        <span className="text-[11px] font-medium text-slate-600 shrink-0 whitespace-nowrap">
+                          {item.tag}
+                        </span>
+                      )}
                       {item.quantity !== 1 && (
                         <span
                           className={`text-[11px] font-mono font-semibold shrink-0 whitespace-nowrap ${
@@ -405,20 +490,21 @@ export const InspectorPanel: React.FC = () => {
                         </span>
                       )}
                     </div>
-                    <div className="text-[11px] text-slate-500 flex items-center gap-1 tabular-nums whitespace-nowrap overflow-hidden">
-                      <span className="shrink-0">权重 {item.weight.toFixed(2)}</span>
-                      {item.tag && item.quantity > 0 && (
+                    <div className="text-[11px] text-slate-500 flex items-center gap-1 font-mono tabular-nums whitespace-nowrap overflow-hidden">
+                      <span className="shrink-0">w:{item.weight.toFixed(2)}</span>
+                      {mp?.marketPriceMedian !== null && mp?.marketPriceMedian !== undefined ? (
                         <>
                           <span aria-hidden="true" className="shrink-0">·</span>
-                          <span className="text-slate-700 font-medium shrink-0">{item.tag}</span>
+                          <span className="text-emerald-700 font-sans font-medium truncate">
+                            市价 ¥{formatMoney(mp.marketPriceMedian)} ({mp.sampleCount}条)
+                          </span>
                         </>
-                      )}
-                      {item.weightSource === 'market_db' && (
+                      ) : item.weightSource === 'market_db' ? (
                         <>
                           <span aria-hidden="true" className="shrink-0">·</span>
-                          <span className="text-emerald-700 shrink-0">行情</span>
+                          <span className="text-emerald-700 font-sans shrink-0">历史行情</span>
                         </>
-                      )}
+                      ) : null}
                     </div>
                   </div>
 
@@ -457,17 +543,128 @@ export const InspectorPanel: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Expanded Item Advanced Controls */}
+                {/* Expanded Item Advanced Controls + Market Traceability */}
                 {isExpanded && (
-                  <div className="px-4 pb-3 pt-1 bg-slate-50/70 space-y-2.5 text-xs border-t border-slate-100">
+                  <div className="px-4 pb-3.5 pt-2 bg-slate-50/70 space-y-2.5 text-xs border-t border-slate-100">
+                    {/* Market Reference Traceability Block */}
+                    <div className="space-y-1.5 pb-2 border-b border-slate-200/70">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-[11px] text-slate-600 tabular-nums">
+                          {mp && mp.marketPriceMedian !== null ? (
+                            <>
+                              <strong className="text-slate-900">
+                                参考中位 ¥{formatMoney(mp.marketPriceMedian)}
+                              </strong>
+                              {mp.marketPriceRange && (
+                                <span>
+                                  {' '}
+                                  (¥{formatMoney(mp.marketPriceRange[0])}~¥{formatMoney(mp.marketPriceRange[1])})
+                                </span>
+                              )}
+                              <span> · {mp.sampleCount}条样本 · {formatFreshnessText(mp.freshness)}</span>
+                            </>
+                          ) : (
+                            <span className="text-slate-500">
+                              暂无外部二手单出样本，可补充系列关键词后重新比价
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isItemLookingUp}
+                          onClick={() =>
+                            void runSingleItemPriceLookup(item.id, {
+                              seriesHint: item.seriesHint,
+                              jpKeywords: item.jpKeywords,
+                              forceRefresh: true,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 disabled:opacity-45 whitespace-nowrap shrink-0"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isItemLookingUp ? 'animate-spin' : ''}`} />
+                          <span>{isItemLookingUp ? '查询中' : '重新比价'}</span>
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <div>
+                          <label className="block text-[10px] text-slate-500 mb-0.5">
+                            系列 / 柄图特征
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="如：原画展吧唧"
+                            value={item.seriesHint ?? ''}
+                            onChange={(e) => updateItemField(item.id, { seriesHint: e.target.value })}
+                            className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-[11px] text-slate-900"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-500 mb-0.5">
+                            煤炉日文检索词
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="如：ハイキュー 孤爪研磨 缶バッジ"
+                            value={item.jpKeywords ?? ''}
+                            onChange={(e) => updateItemField(item.id, { jpKeywords: e.target.value })}
+                            className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-[11px] text-slate-900"
+                          />
+                        </div>
+                      </div>
+
+                      {mp && mp.sources.length > 0 && (
+                        <div className="pt-1 space-y-1">
+                          <div className="text-[10px] font-medium text-slate-500">
+                            比价参考来源明细：
+                          </div>
+                          {mp.sources.slice(0, 4).map((src, sIdx) => {
+                            const safeHref = sanitizeSafeHref(src.url);
+                            return (
+                              <div
+                                key={`${src.platform}-${sIdx}`}
+                                className="flex items-center justify-between gap-2 text-[11px] text-slate-600"
+                              >
+                                <div className="min-w-0 truncate">
+                                  <span className="font-medium text-slate-800">{src.platform}</span>
+                                  <span className="mx-1 text-slate-300">·</span>
+                                  {safeHref ? (
+                                    <a
+                                      href={safeHref}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="hover:text-slate-950 hover:underline inline-flex items-center gap-0.5"
+                                    >
+                                      <span className="truncate max-w-[140px]">{src.title}</span>
+                                      <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                    </a>
+                                  ) : (
+                                    <span>{src.title}</span>
+                                  )}
+                                </div>
+                                <span className="font-mono tabular-nums text-slate-800 shrink-0">
+                                  {src.currency === 'JPY'
+                                    ? `¥${src.rawPrice}円≈¥${formatMoney(src.cnyPrice)}`
+                                    : `¥${formatMoney(src.cnyPrice)}`}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Weight (0.1 ~ 10.0), Quantity & Tag */}
                     <div className="grid grid-cols-3 gap-2">
                       <div>
-                        <label className="block text-[10px] text-slate-500 mb-0.5">热度权重</label>
+                        <label className="block text-[10px] text-slate-500 mb-0.5">
+                          权重 (0.1~10)
+                        </label>
                         <input
                           type="number"
                           step={0.05}
-                          min={0.1}
-                          max={4}
+                          min={WEIGHT_MIN}
+                          max={WEIGHT_MAX}
                           value={item.weight}
                           onChange={(e) => {
                             const v = Number.parseFloat(e.target.value);
@@ -481,7 +678,7 @@ export const InspectorPanel: React.FC = () => {
                         <input
                           type="number"
                           min={0}
-                          max={20}
+                          max={99}
                           step={1}
                           value={item.quantity}
                           onChange={(e) => {
@@ -546,7 +743,7 @@ export const InspectorPanel: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => void handleCrop(item.id)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 whitespace-nowrap shrink-0"
                       >
                         <Scissors className="w-3 h-3" />
                         <span>裁切查价</span>
@@ -554,7 +751,7 @@ export const InspectorPanel: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => deleteItem(item.id)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium text-rose-700 bg-rose-50 hover:bg-rose-100"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 whitespace-nowrap shrink-0"
                       >
                         <Trash2 className="w-3 h-3" />
                         <span>删除单品</span>

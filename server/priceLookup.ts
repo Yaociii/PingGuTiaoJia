@@ -689,7 +689,8 @@ export function buildPriceCacheKey(query: {
  * （例如某烫门市价 85 元、冷门市价 12 元 -> 权重比直接为 85:12）
  */
 export function normalizeMarketPricesToWeights(
-  items: Array<{ id: string; median: number | null; fallbackWeight: number }>
+  items: Array<{ id: string; median: number | null; fallbackWeight: number }>,
+  referenceAvgMarketPrice?: number
 ): Map<string, number> {
   const result = new Map<string, number>();
   const validMedians = items
@@ -703,8 +704,16 @@ export function normalizeMarketPricesToWeights(
     return result;
   }
 
-  // Use average of observed market medians as 1.0 reference so ratios stay exact (m_i / m_j)
-  const avgMarket = validMedians.reduce((sum, v) => sum + v, 0) / validMedians.length;
+  // When re-looking up a single item, anchor against the group's reference average if provided;
+  // otherwise use the batch's mean market median so relative ratios (m_i / m_j) stay exact.
+  const avgMarket =
+    validMedians.length === 1 &&
+    referenceAvgMarketPrice !== undefined &&
+    Number.isFinite(referenceAvgMarketPrice) &&
+    referenceAvgMarketPrice > 0
+      ? referenceAvgMarketPrice
+      : validMedians.reduce((sum, v) => sum + v, 0) / validMedians.length;
+
   for (const it of items) {
     if (it.median !== null && it.median > 0 && avgMarket > 0) {
       const ratio = it.median / avgMarket;
@@ -749,6 +758,7 @@ export class PriceLookupService {
     queries: PriceLookupQuery[];
     jpyRate?: number;
     intlShippingFactor?: number;
+    referenceAvgMarketPrice?: number;
     customAiConfig?: CustomAiConfig;
     now?: Date;
   }): Promise<{ jpyRate: number; results: ItemLookupResult[] }> {
@@ -803,7 +813,8 @@ export class PriceLookupService {
         id: r.query.id,
         median: r.median,
         fallbackWeight: r.localDbWeight ?? r.query.vlmWeight ?? 1.0,
-      }))
+      })),
+      params.referenceAvgMarketPrice
     );
 
     const results: ItemLookupResult[] = rawItemResults.map((r) => {

@@ -5,6 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import { GachaDatabase } from './server/db';
 import { GeminiVlmProvider } from './server/vlmProvider';
 import { createApiRouter } from './server/app';
+import { registerGroupH5Route } from './server/groupH5Page';
 
 async function startServer() {
   const app = express();
@@ -20,8 +21,9 @@ async function startServer() {
 
   const vlmProvider = new GeminiVlmProvider('gemini-4-hydrogen');
 
-  // Mount API routes
+  // Mount API routes and lightweight mobile H5 claim page (/g/:shareCode)
   app.use('/api/v1', createApiRouter({ db, vlmProvider }));
+  registerGroupH5Route(app, db);
 
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve(process.cwd(), 'dist');
